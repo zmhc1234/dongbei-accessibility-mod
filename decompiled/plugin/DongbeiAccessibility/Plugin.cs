@@ -3315,10 +3315,25 @@ public class Plugin : BaseUnityPlugin
 			{
 				log2.LogInfo((object)$"找到 {array.Length} 个节点组件");
 			}
+			int currentStorylineChapterFilter = GetCurrentStorylineChapterFilter();
+			if (currentStorylineChapterFilter > 0)
+			{
+				Log.LogInfo((object)$"[故事线] 当前章节筛选: {currentStorylineChapterFilter}");
+			}
 			List<OptionItem> list = new List<OptionItem>();
+			HashSet<string> hashSet = new HashSet<string>();
+			Dictionary<int, int> dictionary = new Dictionary<int, int>();
+			Dictionary<int, int> dictionary2 = new Dictionary<int, int>();
+			int num4 = 0;
+			int num5 = 0;
 			for (int i = 0; i < array.Length; i++)
 			{
 				object value = array.GetValue(i);
+				if (!IsComponentActiveInHierarchy(value))
+				{
+					Log.LogDebug((object)$"[故事线过滤] 跳过隐藏节点组件 index={i}");
+					continue;
+				}
 				OptionItem optionItem = new OptionItem();
 				optionItem.ClickableComponent = value;
 				FieldInfo field = _progressTreeNodeComponentType.GetField("node", BindingFlags.Instance | BindingFlags.Public);
@@ -3336,6 +3351,29 @@ public class Plugin : BaseUnityPlugin
 						string text = ((field2 != null) ? ((string)field2.GetValue(value2)) : $"节点{i + 1}");
 						string text2 = ((field3 != null) ? ((string)field3.GetValue(value2)) : "");
 						int num = ((field4 != null) ? ((int)field4.GetValue(value2)) : 0);
+						if (!dictionary.ContainsKey(num))
+						{
+							dictionary[num] = 0;
+						}
+						dictionary[num]++;
+						if (currentStorylineChapterFilter > 0 && num > 0 && num != currentStorylineChapterFilter)
+						{
+							num4++;
+							Log.LogInfo((object)$"[故事线过滤] 跳过其他章节节点: {text}, chapter={num}, current={currentStorylineChapterFilter}");
+							continue;
+						}
+						string text3 = string.IsNullOrWhiteSpace(text) ? $"component_{i}" : text.Trim();
+						if (!hashSet.Add(text3))
+						{
+							num5++;
+							Log.LogInfo((object)("[故事线过滤] 跳过重复节点: " + text3));
+							continue;
+						}
+						if (!dictionary2.ContainsKey(num))
+						{
+							dictionary2[num] = 0;
+						}
+						dictionary2[num]++;
 						int num2 = ((layoutLayerField != null) ? ((int)layoutLayerField.GetValue(value2)) : 0);
 						int num3 = ((layoutOrderField != null) ? ((int)layoutOrderField.GetValue(value2)) : 0);
 						optionItem.Index = BuildStorylineNodeSortKey(num, num2, num3, i);
@@ -3390,8 +3428,15 @@ public class Plugin : BaseUnityPlugin
 				{
 					optionItem.Text = $"节点 {i + 1}";
 				}
-				list.Add(optionItem);
+				if (!string.IsNullOrWhiteSpace(optionItem.Text))
+				{
+					list.Add(optionItem);
+				}
 			}
+			LogStorylineNodeChapterSummary("原始", dictionary);
+			LogStorylineNodeChapterSummary("过滤后", dictionary2);
+			Log.LogInfo((object)$"[故事线过滤] 混入其他章节 {num4} 个，重复节点 {num5} 个");
+			Log.LogInfo((object)$"[故事线过滤] 过滤后剩余 {list.Count} 个节点");
 			bool hasRenderPosition = list.Any((OptionItem o) => o.HasScreenPosition);
 			list.Sort(delegate(OptionItem a, OptionItem b)
 			{
@@ -3431,6 +3476,84 @@ public class Plugin : BaseUnityPlugin
 			}
 			return new OptionItem[0];
 		}
+	}
+
+	private static int GetCurrentStorylineChapterFilter()
+	{
+		try
+		{
+			ResolveStorylineTypes();
+			if (_progressTreeGraphControllerType == null)
+			{
+				return 0;
+			}
+			object activeObject = GetActiveObject(_progressTreeGraphControllerType);
+			if (activeObject == null)
+			{
+				return 0;
+			}
+			MethodInfo method = _progressTreeGraphControllerType.GetMethod("GetCurrentChapterFilter", BindingFlags.Instance | BindingFlags.Public);
+			if (method != null)
+			{
+				object obj = method.Invoke(activeObject, null);
+				if (obj is int num)
+				{
+					return num;
+				}
+			}
+			FieldInfo field = _progressTreeGraphControllerType.GetField("currentChapterFilter", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+			if (field != null)
+			{
+				object obj2 = field.GetValue(activeObject);
+				if (obj2 is int num2)
+				{
+					return num2;
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[故事线] 获取当前章节筛选失败: " + ex.Message));
+		}
+		return 0;
+	}
+
+	private static void LogStorylineNodeChapterSummary(string label, Dictionary<int, int> counts)
+	{
+		try
+		{
+			if (counts == null || counts.Count == 0)
+			{
+				Log.LogInfo((object)("[故事线统计] " + label + ": 无节点"));
+				return;
+			}
+			string text = string.Join(", ", counts.OrderBy((KeyValuePair<int, int> p) => p.Key).Select((KeyValuePair<int, int> p) => $"第{p.Key}章={p.Value}"));
+			Log.LogInfo((object)("[故事线统计] " + label + ": " + text));
+		}
+		catch
+		{
+		}
+	}
+
+	private static bool IsComponentActiveInHierarchy(object component)
+	{
+		if (component == null)
+		{
+			return false;
+		}
+		try
+		{
+			PropertyInfo property = component.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
+			object value = property?.GetValue(component);
+			if (value != null)
+			{
+				return IsGameObjectActiveInHierarchy(value);
+			}
+		}
+		catch
+		{
+		}
+		return true;
 	}
 
 	private static int BuildStorylineNodeSortKey(int chapterNumber, int layoutLayer, int layoutOrder, int fallbackIndex)
