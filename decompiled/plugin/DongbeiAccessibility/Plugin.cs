@@ -596,7 +596,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				OptionItem[] clickableOptions = GetClickableOptions();
 				LogInputState("DetectUIState settings ignored; candidates=" + ((clickableOptions != null) ? clickableOptions.Length.ToString() : "null"));
-				if (clickableOptions != null && clickableOptions.Length >= 2)
+				if (clickableOptions != null && clickableOptions.Length > 0)
 				{
 					uIState = UIState.Options;
 					text = GetOptionsSignature(clickableOptions);
@@ -616,7 +616,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				OptionItem[] clickableOptions = GetClickableOptions();
 				LogInputState("DetectUIState candidates=" + ((clickableOptions != null) ? clickableOptions.Length.ToString() : "null"));
-				if (clickableOptions != null && clickableOptions.Length >= 2)
+				if (clickableOptions != null && clickableOptions.Length > 0)
 				{
 					uIState = UIState.Options;
 					text = GetOptionsSignature(clickableOptions);
@@ -934,6 +934,12 @@ public class Plugin : BaseUnityPlugin
 					list.Add(optionItem);
 				}
 			}
+			OptionItem[] singleStartOptions = GetSingleStartOptions(allVisibleTextsWithPosition);
+			if (singleStartOptions.Length > 0)
+			{
+				Log.LogInfo((object)("[选项过滤] 检测到单按钮启动页: " + singleStartOptions[0].Text));
+				return singleStartOptions;
+			}
 			if (list.Count >= 2 && list.Count <= 12)
 			{
 				return list.ToArray();
@@ -1030,6 +1036,37 @@ public class Plugin : BaseUnityPlugin
 			Log.LogError((object)("获取可点击选项失败: " + ex.Message));
 			return new OptionItem[0];
 		}
+	}
+
+	private static OptionItem[] GetSingleStartOptions(OptionItem[] visibleTexts)
+	{
+		if (visibleTexts == null || visibleTexts.Length == 0)
+		{
+			return new OptionItem[0];
+		}
+		string[] array = new string[6] { "点击开始", "开始游戏", "新游戏", "继续游戏", "开始", "继续" };
+		List<OptionItem> list = new List<OptionItem>();
+		foreach (OptionItem optionItem in visibleTexts)
+		{
+			string text = optionItem?.Text?.Trim();
+			if (string.IsNullOrEmpty(text))
+			{
+				continue;
+			}
+			foreach (string value in array)
+			{
+				if (text.Equals(value, StringComparison.OrdinalIgnoreCase) || text.Contains(value))
+				{
+					list.Add(optionItem);
+					break;
+				}
+			}
+		}
+		if (list.Count == 0 || list.Count > 3)
+		{
+			return new OptionItem[0];
+		}
+		return list.GroupBy((OptionItem o) => o.Text).Select((IGrouping<string, OptionItem> g) => g.First()).ToArray();
 	}
 
 	private static bool IsInSettingsPage()
