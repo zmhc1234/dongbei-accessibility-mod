@@ -661,7 +661,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			else if (_currentUIState == UIState.Options && uIState != UIState.Options)
 			{
-				if (uIState == UIState.Settings || uIState == UIState.Storyline || uIState == UIState.QTE)
+				if (uIState == UIState.Settings || uIState == UIState.Storyline || uIState == UIState.QTE || (uIState == UIState.Dialogue && AreCurrentOptionsFromGameController()))
 				{
 					Log.LogInfo((object)$"[防抖] 选项切换到明确界面 {uIState}，立即切换");
 					_optionsMissCount = 0;
@@ -820,7 +820,7 @@ public class Plugin : BaseUnityPlugin
 	private static void EnterOptionsModeAuto()
 	{
 		OptionItem[] clickableOptions = GetClickableOptions();
-		if (clickableOptions == null || clickableOptions.Length < 2)
+		if (clickableOptions == null || clickableOptions.Length == 0)
 		{
 			LeaveOptions();
 			return;
@@ -934,15 +934,15 @@ public class Plugin : BaseUnityPlugin
 					list.Add(optionItem);
 				}
 			}
-			OptionItem[] singleStartOptions = GetSingleStartOptions(allVisibleTextsWithPosition);
-			if (singleStartOptions.Length > 0)
-			{
-				Log.LogInfo((object)("[选项过滤] 检测到单按钮启动页: " + singleStartOptions[0].Text));
-				return singleStartOptions;
-			}
 			if (list.Count >= 2 && list.Count <= 12)
 			{
 				return list.ToArray();
+			}
+			OptionItem[] singleStartOptions = GetSingleStartOptions(allVisibleTextsWithPosition);
+			if (list.Count < 2 && singleStartOptions.Length > 0)
+			{
+				Log.LogInfo((object)("[选项过滤] 检测到单按钮启动页: " + singleStartOptions[0].Text));
+				return singleStartOptions;
 			}
 			if (list.Count > 12)
 			{
@@ -3156,6 +3156,7 @@ public class Plugin : BaseUnityPlugin
 			TolkHelper.Speak("没有找到章节", interrupt: true);
 			return;
 		}
+		ClearNodeMode("Enter storyline chapter selection");
 		List<OptionItem> list = new List<OptionItem>();
 		ChapterInfo[] array = storylineChapters;
 		ChapterInfo[] array2 = array;
@@ -4741,6 +4742,10 @@ public class Plugin : BaseUnityPlugin
 			bool flag = !string.IsNullOrEmpty(optionItem.Text) && (optionItem.Text.Contains("返回") || optionItem.Text.Contains("关闭") || optionItem.Text.Equals("Back", StringComparison.OrdinalIgnoreCase));
 			PlayGameSound(flag ? "Back" : "Click");
 			TolkHelper.Speak("点击 " + optionItem.Text, interrupt: true);
+			if (optionItem.ChapterInfo != null)
+			{
+				ClearNodeMode("Click storyline chapter");
+			}
 			if (optionItem.Index >= 0 && optionItem.ClickableComponent != null && _gameControllerType != null && optionItem.ClickableComponent.GetType() == _gameControllerType)
 			{
 				ManualLogSource log2 = Log;
@@ -4759,6 +4764,7 @@ public class Plugin : BaseUnityPlugin
 						{
 							log3.LogInfo((object)"OnOptionButtonClick调用成功");
 						}
+						ClearCurrentOptionsAfterGameSelection();
 						return;
 					}
 				}
@@ -4819,6 +4825,50 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
+	private static bool AreCurrentOptionsFromGameController()
+	{
+		if (_gameControllerType == null || _options == null || _options.Length == 0)
+		{
+			return false;
+		}
+		foreach (OptionItem optionItem in _options)
+		{
+			if (optionItem != null && optionItem.ClickableComponent != null && optionItem.ClickableComponent.GetType() == _gameControllerType)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static void ClearCurrentOptionsAfterGameSelection()
+	{
+		if (!AreCurrentOptionsFromGameController())
+		{
+			return;
+		}
+		_inOptionsMode = false;
+		_options = new OptionItem[0];
+		_currentOptionIndex = 0;
+		_optionsMissCount = 0;
+		_currentUIState = UIState.Unknown;
+		_lastDetectedSignature = "";
+		MarkNeedDetect();
+		LogInputState("Clear options after game selection");
+	}
+
+	private static void ClearNodeMode(string reason)
+	{
+		if (!_inNodeMode && (_storylineNodes == null || _storylineNodes.Length == 0) && _currentNodeIndex == 0)
+		{
+			return;
+		}
+		_inNodeMode = false;
+		_storylineNodes = new OptionItem[0];
+		_currentNodeIndex = 0;
+		LogInputState("Clear node mode: " + reason);
+	}
+
 	private static bool TryActivateKnownMainMenuOption(OptionItem optionItem)
 	{
 		string text = optionItem?.Text;
@@ -4835,6 +4885,12 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (text.Contains("开始游戏") || text.Contains("新游戏") || text.Contains("继续游戏"))
 			{
+				if (optionItem != null && optionItem.ClickableComponent != null && ClickComponent(optionItem.ClickableComponent))
+				{
+					Log.LogInfo((object)("[主菜单] 已触发按钮自身事件: " + text));
+					MarkNeedDetect();
+					return true;
+				}
 				if (TryStartGameFromMenu(text))
 				{
 					return true;
@@ -5253,6 +5309,15 @@ public class Plugin : BaseUnityPlugin
 			return;
 		}
 		text = text.Trim();
+		if (IsIgnoredAutoSpeakText(text))
+		{
+			ManualLogSource log = Log;
+			if (log != null)
+			{
+				log.LogDebug((object)("跳过测试字幕: " + text));
+			}
+			return;
+		}
 		if (string.IsNullOrEmpty(text) || text == _lastSpokenText)
 		{
 			return;
@@ -5275,6 +5340,16 @@ public class Plugin : BaseUnityPlugin
 			log2.LogDebug((object)("朗读: " + text));
 		}
 		MarkNeedDetect();
+	}
+
+	private static bool IsIgnoredAutoSpeakText(string text)
+	{
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			return true;
+		}
+		string text2 = text.Trim();
+		return text2.Contains("这是测试字幕") || text2.Contains("测试字幕") || text2.IndexOf("This is Test Subtitle", StringComparison.OrdinalIgnoreCase) >= 0 || text2.IndexOf("Test Subtitle", StringComparison.OrdinalIgnoreCase) >= 0;
 	}
 
 	private static void DetectOptions()
