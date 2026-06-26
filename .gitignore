@@ -1,0 +1,6 @@
+decompiled/plugin/bin/
+decompiled/plugin/obj/
+*.user
+*.suo
+*.log
+*.tmp
