@@ -14,5 +14,7 @@ public class OptionItem
 
 	public ChapterInfo ChapterInfo { get; set; }
 
+	public string NodeId { get; set; }
+
 	public int Index { get; set; } = -1;
 }
