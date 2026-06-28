@@ -140,11 +140,15 @@ public class Plugin : BaseUnityPlugin
 
 	private static DateTime _ignoreSettingsUntilUtc = DateTime.MinValue;
 
+	private static DateTime _ignoreOptionsUntilUtc = DateTime.MinValue;
+
 	private const int WH_KEYBOARD_LL = 13;
 
 	private const int WM_KEYDOWN = 256;
 
 	private const int WM_SYSKEYDOWN = 260;
+
+	private const int LLKHF_ALTDOWN = 32;
 
 	private static LowLevelKeyboardProc _keyboardProc;
 
@@ -170,7 +174,13 @@ public class Plugin : BaseUnityPlugin
 
 	private const int VK_D = 68;
 
+	private const int VK_TAB = 9;
+
 	private const int VK_RETURN = 13;
+
+	private const int VK_ESCAPE = 27;
+
+	private const int VK_BACK = 8;
 
 	private const int VK_UP = 38;
 
@@ -635,6 +645,12 @@ public class Plugin : BaseUnityPlugin
 				uIState = UIState.Settings;
 				text = GetSettingsSignature();
 			}
+			else if (DateTime.UtcNow < _ignoreOptionsUntilUtc)
+			{
+				uIState = UIState.Dialogue;
+				text = "dialogue";
+				LogInputState("DetectUIState options ignored after game selection");
+			}
 			else
 			{
 				OptionItem[] endingOptions = GetEndingPageOptions();
@@ -693,7 +709,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			else if (_currentUIState == UIState.Options && uIState != UIState.Options)
 			{
-				if (uIState == UIState.Settings || uIState == UIState.Storyline || uIState == UIState.QTE || (uIState == UIState.Dialogue && AreCurrentOptionsFromGameController()))
+				if (uIState == UIState.Settings || uIState == UIState.Storyline || uIState == UIState.QTE || uIState == UIState.Dialogue || AreCurrentOptionsFromGameController())
 				{
 					Log.LogInfo((object)$"[防抖] 选项切换到明确界面 {uIState}，立即切换");
 					_optionsMissCount = 0;
@@ -878,6 +894,11 @@ public class Plugin : BaseUnityPlugin
 	{
 		try
 		{
+			if (DateTime.UtcNow < _ignoreOptionsUntilUtc)
+			{
+				Log.LogDebug((object)"[精准检测] 刚处理过剧情选项，暂不从 GameController 获取旧选项");
+				return new OptionItem[0];
+			}
 			if (_gameControllerType == null || _gameNodeType == null || _gameOptionType == null)
 			{
 				return new OptionItem[0];
@@ -5167,10 +5188,20 @@ public class Plugin : BaseUnityPlugin
 			if (nCode >= 0 && (wParam == (IntPtr)256 || wParam == (IntPtr)260))
 			{
 				int num = Marshal.ReadInt32(lParam);
+				int num2 = Marshal.ReadInt32(lParam, 8);
 				ManualLogSource log = Log;
 				if (log != null)
 				{
 					log.LogDebug((object)$"[键盘钩子] 按键: 0x{num:X2}");
+				}
+				if (wParam == (IntPtr)260 || (num2 & LLKHF_ALTDOWN) != 0)
+				{
+					ManualLogSource log6 = Log;
+					if (log6 != null)
+					{
+						log6.LogDebug((object)$"[键盘钩子] Alt/System 组合键 0x{num:X2} 放行");
+					}
+					return CallNextHookEx(_hookId, nCode, wParam, lParam);
 				}
 				if (!IsGameWindowActive())
 				{
@@ -5181,7 +5212,7 @@ public class Plugin : BaseUnityPlugin
 					}
 					return CallNextHookEx(_hookId, nCode, wParam, lParam);
 				}
-				if (IsModifierKeyDown() && !IsModifierKey(num))
+				if (IsModifierKeyDown() && !IsModifierKey(num) && !ShouldHandleKeyEvenWithModifier(num))
 				{
 					ManualLogSource log5 = Log;
 					if (log5 != null)
@@ -5618,6 +5649,15 @@ public class Plugin : BaseUnityPlugin
 		return vkCode == VK_SHIFT || vkCode == VK_CONTROL || vkCode == VK_MENU || vkCode == VK_LWIN || vkCode == VK_RWIN;
 	}
 
+	private static bool ShouldHandleKeyEvenWithModifier(int vkCode)
+	{
+		if (vkCode == VK_TAB)
+		{
+			return false;
+		}
+		return vkCode == VK_RETURN || vkCode == VK_ESCAPE || vkCode == VK_BACK || vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT || vkCode == VK_SPACE || IsDigitShortcut(vkCode);
+	}
+
 	private static bool IsKeyDown(int vkCode)
 	{
 		return (GetAsyncKeyState(vkCode) & 0x8000) != 0;
@@ -5832,6 +5872,7 @@ public class Plugin : BaseUnityPlugin
 		_optionsMissCount = 0;
 		_currentUIState = UIState.Unknown;
 		_lastDetectedSignature = "";
+		_ignoreOptionsUntilUtc = DateTime.UtcNow.AddSeconds(1.5);
 		MarkNeedDetect();
 		LogInputState("Clear options after game selection");
 	}
