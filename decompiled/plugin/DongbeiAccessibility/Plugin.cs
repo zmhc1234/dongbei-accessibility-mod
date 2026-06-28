@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -142,6 +143,10 @@ public class Plugin : BaseUnityPlugin
 
 	private static DateTime _ignoreOptionsUntilUtc = DateTime.MinValue;
 
+	private static DateTime _steamOverlayRecoveryUntilUtc = DateTime.MinValue;
+
+	private static DateTime _lastSteamOverlayLogUtc = DateTime.MinValue;
+
 	private const int WH_KEYBOARD_LL = 13;
 
 	private const int WM_KEYDOWN = 256;
@@ -165,8 +170,6 @@ public class Plugin : BaseUnityPlugin
 	private const int VK_F8 = 119;
 
 	private const int VK_F9 = 120;
-
-	private const int VK_F10 = 121;
 
 	private const int VK_F11 = 122;
 
@@ -4121,6 +4124,57 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
+	private static void EnterNodeModeAfterChapterClick()
+	{
+		ThreadPool.QueueUserWorkItem(delegate
+		{
+			for (int i = 0; i < 8; i++)
+			{
+				Thread.Sleep(250);
+				try
+				{
+					MarkNeedDetect();
+					OptionItem[] storylineNodes = GetStorylineNodes();
+					if (storylineNodes.Length > 0)
+					{
+						_inNodeMode = true;
+						_storylineNodes = storylineNodes;
+						_currentNodeIndex = 0;
+						_currentUIState = UIState.Storyline;
+						TolkHelper.Speak($"已进入节点浏览模式，共 {storylineNodes.Length} 个节点。按上下光标切换节点，按回车跳转到该节点", interrupt: true);
+						ManualLogSource log = Log;
+						if (log != null)
+						{
+							log.LogInfo((object)$"[故事线] 点击章节后自动进入节点浏览模式，共 {storylineNodes.Length} 个节点");
+						}
+						return;
+					}
+				}
+				catch (Exception ex)
+				{
+					ManualLogSource log2 = Log;
+					if (log2 != null)
+					{
+						log2.LogDebug((object)("[故事线] 点击章节后自动进入节点浏览失败: " + ex.Message));
+					}
+				}
+			}
+			ManualLogSource log3 = Log;
+			if (log3 != null)
+			{
+				log3.LogWarning((object)"[故事线] 点击章节后没有找到节点，保持章节选择模式");
+			}
+		});
+	}
+
+	private static void ReturnToChapterSelectionFromNodeMode()
+	{
+		ClearNodeMode("Return to chapter selection from node mode");
+		EnterStorylineMode();
+		TolkHelper.Speak("已返回章节选择", interrupt: true);
+		MarkNeedDetect();
+	}
+
 	private static void SpeakCurrentNode()
 	{
 		if (_storylineNodes != null && _storylineNodes.Length != 0 && _currentNodeIndex >= 0 && _currentNodeIndex < _storylineNodes.Length)
@@ -4646,8 +4700,8 @@ public class Plugin : BaseUnityPlugin
 				}
 				else
 				{
-					Log.LogWarning((object)"【自动过 QTE】跳过失败，请尝试按 F10 手动跳过");
-					TolkHelper.Speak("QTE 自动跳过失败，请按 F10 试试", interrupt: true);
+					Log.LogWarning((object)"【自动过 QTE】跳过失败");
+					TolkHelper.Speak("QTE 自动跳过失败", interrupt: true);
 				}
 			}
 		}
@@ -5194,6 +5248,7 @@ public class Plugin : BaseUnityPlugin
 				{
 					log.LogDebug((object)$"[键盘钩子] 按键: 0x{num:X2}");
 				}
+				RecordSteamOverlayShortcut(num, wParam, num2);
 				if (wParam == (IntPtr)260 || (num2 & LLKHF_ALTDOWN) != 0)
 				{
 					ManualLogSource log6 = Log;
@@ -5205,12 +5260,16 @@ public class Plugin : BaseUnityPlugin
 				}
 				if (!IsGameWindowActive())
 				{
-					ManualLogSource log2 = Log;
-					if (log2 != null)
+					if (!ShouldHandleSteamOverlayForeground(num))
 					{
-						log2.LogDebug((object)"[键盘钩子] 游戏窗口不在前台，忽略按键");
+						ManualLogSource log2 = Log;
+						if (log2 != null)
+						{
+							log2.LogDebug((object)"[键盘钩子] 游戏窗口不在前台，忽略按键");
+						}
+						return CallNextHookEx(_hookId, nCode, wParam, lParam);
 					}
-					return CallNextHookEx(_hookId, nCode, wParam, lParam);
+					LogSteamOverlayBypass(num);
 				}
 				if (IsModifierKeyDown() && !IsModifierKey(num) && !ShouldHandleKeyEvenWithModifier(num))
 				{
@@ -5289,23 +5348,6 @@ public class Plugin : BaseUnityPlugin
 				_suppressCurrentKey = true;
 				break;
 			}
-			case 121:
-			{
-				if (_inSettingsMode)
-				{
-					LogInputState("F10 ignored in settings");
-					_suppressCurrentKey = true;
-					break;
-				}
-				ManualLogSource log3 = Log;
-				if (log3 != null)
-				{
-					log3.LogInfo((object)"[快捷键] F10 按下 - 一键过 QTE（精准版）");
-				}
-				SkipCurrentQTE();
-				_suppressCurrentKey = true;
-				break;
-			}
 			case 122:
 			{
 				if (_inSettingsMode)
@@ -5337,31 +5379,6 @@ public class Plugin : BaseUnityPlugin
 					log4.LogInfo((object)"[快捷键] F4 按下 - 一键过探索场景");
 				}
 				SkipExploreScene();
-				_suppressCurrentKey = true;
-				break;
-			}
-			case 113:
-			{
-				ManualLogSource log10 = Log;
-				if (log10 != null)
-				{
-					log10.LogInfo((object)"[快捷键] F2 按下 - 切换节点浏览模式");
-				}
-				if (_inNodeMode)
-				{
-					_inNodeMode = false;
-					_storylineNodes = new OptionItem[0];
-					_currentNodeIndex = 0;
-					TolkHelper.Speak("退出节点浏览模式", interrupt: true);
-				}
-				else if (_currentUIState != UIState.Storyline)
-				{
-					LogInputState("F2 ignored outside storyline");
-				}
-				else
-				{
-					EnterNodeMode();
-				}
 				_suppressCurrentKey = true;
 				break;
 			}
@@ -5408,7 +5425,12 @@ public class Plugin : BaseUnityPlugin
 				{
 					log18.LogInfo((object)"[快捷键] ESC 按下");
 				}
-				if (_inSettingsMode && _settings.Length != 0 && ActivateReturnSetting())
+				if (_inNodeMode)
+				{
+					ReturnToChapterSelectionFromNodeMode();
+					_suppressCurrentKey = true;
+				}
+				else if (_inSettingsMode && _settings.Length != 0 && ActivateReturnSetting())
 				{
 					_suppressCurrentKey = true;
 				}
@@ -5658,6 +5680,77 @@ public class Plugin : BaseUnityPlugin
 		return vkCode == VK_RETURN || vkCode == VK_ESCAPE || vkCode == VK_BACK || vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT || vkCode == VK_SPACE || IsDigitShortcut(vkCode);
 	}
 
+	private static void RecordSteamOverlayShortcut(int vkCode, IntPtr wParam, int flags)
+	{
+		try
+		{
+			bool flag = vkCode == VK_TAB && IsKeyDown(VK_SHIFT);
+			if (flag)
+			{
+				_steamOverlayRecoveryUntilUtc = DateTime.UtcNow.AddMinutes(2.0);
+				_needDetect = true;
+				Log.LogInfo((object)"[键盘钩子] 检测到 Shift+Tab，仅允许 Steam Overlay 前台临时处理导航");
+			}
+		}
+		catch
+		{
+		}
+	}
+
+	private static bool ShouldHandleSteamOverlayForeground(int vkCode)
+	{
+		if (DateTime.UtcNow > _steamOverlayRecoveryUntilUtc)
+		{
+			return false;
+		}
+		if (!IsSteamOverlayForeground())
+		{
+			return false;
+		}
+		return vkCode == VK_RETURN || vkCode == VK_ESCAPE || vkCode == VK_BACK || vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT || vkCode == VK_SPACE || vkCode == VK_D || vkCode == VK_F5 || vkCode == VK_F6 || vkCode == VK_F11 || IsDigitShortcut(vkCode);
+	}
+
+	private static bool IsSteamOverlayForeground()
+	{
+		try
+		{
+			IntPtr foregroundWindow = GetForegroundWindow();
+			if (foregroundWindow == IntPtr.Zero)
+			{
+				return false;
+			}
+			GetWindowThreadProcessId(foregroundWindow, out var lpdwProcessId);
+			if (lpdwProcessId == 0 || lpdwProcessId == _gameProcessId)
+			{
+				return false;
+			}
+			string processName = Process.GetProcessById((int)lpdwProcessId).ProcessName ?? "";
+			return processName.IndexOf("GameOverlayUI", StringComparison.OrdinalIgnoreCase) >= 0;
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[键盘钩子] 检查 Steam Overlay 前台失败: " + ex.Message));
+			return false;
+		}
+	}
+
+	private static void LogSteamOverlayBypass(int vkCode)
+	{
+		try
+		{
+			DateTime utcNow = DateTime.UtcNow;
+			if ((utcNow - _lastSteamOverlayLogUtc).TotalSeconds < 2.0)
+			{
+				return;
+			}
+			_lastSteamOverlayLogUtc = utcNow;
+			Log.LogInfo((object)$"[键盘钩子] Steam Overlay 前台，继续处理游戏导航按键 0x{vkCode:X2}");
+		}
+		catch
+		{
+		}
+	}
+
 	private static bool IsKeyDown(int vkCode)
 	{
 		return (GetAsyncKeyState(vkCode) & 0x8000) != 0;
@@ -5759,9 +5852,10 @@ public class Plugin : BaseUnityPlugin
 				return;
 			}
 			bool flag = !string.IsNullOrEmpty(optionItem.Text) && (optionItem.Text.Contains("返回") || optionItem.Text.Contains("关闭") || optionItem.Text.Equals("Back", StringComparison.OrdinalIgnoreCase));
+			bool flag2 = optionItem.ChapterInfo != null;
 			PlayGameSound(flag ? "Back" : "Click");
 			TolkHelper.Speak("点击 " + optionItem.Text, interrupt: true);
-			if (optionItem.ChapterInfo != null)
+			if (flag2)
 			{
 				ClearNodeMode("Click storyline chapter");
 			}
@@ -5814,6 +5908,10 @@ public class Plugin : BaseUnityPlugin
 					{
 						log6.LogInfo((object)"组件点击成功");
 					}
+					if (flag2)
+					{
+						EnterNodeModeAfterChapterClick();
+					}
 					return;
 				}
 				ManualLogSource log7 = Log;
@@ -5829,6 +5927,10 @@ public class Plugin : BaseUnityPlugin
 			else
 			{
 				ClickScreenCenter();
+			}
+			if (flag2)
+			{
+				EnterNodeModeAfterChapterClick();
 			}
 		}
 		else
@@ -6388,24 +6490,52 @@ public class Plugin : BaseUnityPlugin
 		{
 			return;
 		}
-		if (!_subtitleSpeakEnabled)
+		if (IsPriorityStatusText(text))
 		{
+			_lastSpokenText = text;
+			TolkHelper.Speak(text, interrupt: true);
 			ManualLogSource log = Log;
 			if (log != null)
 			{
-				log.LogDebug((object)("字幕朗读已关闭，跳过自动朗读: " + text));
+				log.LogInfo((object)("[状态提示] 优先朗读: " + text));
+			}
+			MarkNeedDetect();
+			return;
+		}
+		if (!_subtitleSpeakEnabled)
+		{
+			ManualLogSource log2 = Log;
+			if (log2 != null)
+			{
+				log2.LogDebug((object)("字幕朗读已关闭，跳过自动朗读: " + text));
 			}
 			_lastSpokenText = text;
 			return;
 		}
 		_lastSpokenText = text;
 		TolkHelper.Speak(text);
-		ManualLogSource log2 = Log;
-		if (log2 != null)
+		ManualLogSource log3 = Log;
+		if (log3 != null)
 		{
-			log2.LogDebug((object)("朗读: " + text));
+			log3.LogDebug((object)("朗读: " + text));
 		}
 		MarkNeedDetect();
+	}
+
+	private static bool IsPriorityStatusText(string text)
+	{
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			return false;
+		}
+		string text2 = text.Trim();
+		if (text2.Length > 40)
+		{
+			return false;
+		}
+		bool flag = text2.Contains("好感") || text2.Contains("威望") || text2.Contains("亲密") || text2.Contains("信任");
+		bool flag2 = text2.Contains("增加") || text2.Contains("减少") || text2.Contains("上升") || text2.Contains("下降") || text2.Contains("+") || text2.Contains("-");
+		return flag && flag2;
 	}
 
 	private static bool IsIgnoredAutoSpeakText(string text)
