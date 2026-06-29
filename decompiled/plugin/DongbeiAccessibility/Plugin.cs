@@ -664,14 +664,6 @@ public class Plugin : BaseUnityPlugin
 					LogInputState("DetectUIState ending options=" + endingOptions.Length);
 					goto DetectionComplete;
 				}
-				OptionItem[] exploreOptions = GetExploreInteractionOptions();
-				if (exploreOptions != null && exploreOptions.Length > 0)
-				{
-					uIState = UIState.Options;
-					text = GetOptionsSignature(exploreOptions);
-					LogInputState("DetectUIState explore options=" + exploreOptions.Length);
-					goto DetectionComplete;
-				}
 				OptionItem[] clickableOptions = GetClickableOptions();
 				LogInputState("DetectUIState candidates=" + ((clickableOptions != null) ? clickableOptions.Length.ToString() : "null"));
 				if (clickableOptions != null && clickableOptions.Length > 0)
@@ -681,6 +673,14 @@ public class Plugin : BaseUnityPlugin
 				}
 				else
 				{
+					OptionItem[] exploreOptions = GetExploreInteractionOptions();
+					if (exploreOptions != null && exploreOptions.Length > 0)
+					{
+						uIState = UIState.Options;
+						text = GetOptionsSignature(exploreOptions);
+						LogInputState("DetectUIState explore options=" + exploreOptions.Length);
+						goto DetectionComplete;
+					}
 					uIState = UIState.Dialogue;
 					text = "dialogue";
 				}
