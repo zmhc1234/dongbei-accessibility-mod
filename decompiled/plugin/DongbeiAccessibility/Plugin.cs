@@ -664,6 +664,14 @@ public class Plugin : BaseUnityPlugin
 					LogInputState("DetectUIState ending options=" + endingOptions.Length);
 					goto DetectionComplete;
 				}
+				OptionItem[] exploreOptions = GetExploreInteractionOptions();
+				if (exploreOptions != null && exploreOptions.Length > 0)
+				{
+					uIState = UIState.Options;
+					text = GetOptionsSignature(exploreOptions);
+					LogInputState("DetectUIState explore options=" + exploreOptions.Length);
+					goto DetectionComplete;
+				}
 				OptionItem[] clickableOptions = GetClickableOptions();
 				LogInputState("DetectUIState candidates=" + ((clickableOptions != null) ? clickableOptions.Length.ToString() : "null"));
 				if (clickableOptions != null && clickableOptions.Length > 0)
@@ -4611,6 +4619,73 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
+	private static OptionItem[] GetExploreInteractionOptions()
+	{
+		try
+		{
+			ResolveTriggerAreaTypes();
+			if (_triggerAreaType == null)
+			{
+				return new OptionItem[0];
+			}
+			Array array = FindObjectsOfType(_triggerAreaType);
+			if (array == null || array.Length == 0)
+			{
+				return new OptionItem[0];
+			}
+			List<OptionItem> list = new List<OptionItem>();
+			foreach (object item in array)
+			{
+				if (!IsComponentActiveInHierarchy(item) || !HasInvokableOnClick(item))
+				{
+					continue;
+				}
+				OptionItem optionItem = new OptionItem();
+				optionItem.Text = "探索交互点 " + (list.Count + 1);
+				optionItem.ClickableComponent = item;
+				if (TryGetScreenPosition(GetGameObjectFromComponent(item), out var x, out var y))
+				{
+					optionItem.ScreenX = x;
+					optionItem.ScreenY = y;
+					optionItem.HasScreenPosition = true;
+				}
+				list.Add(optionItem);
+				if (list.Count >= 20)
+				{
+					break;
+				}
+			}
+			if (list.Count > 0)
+			{
+				Log.LogInfo((object)$"[探索] 自动检测到 {list.Count} 个交互点");
+			}
+			return SortOptions(list.ToArray());
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[探索] 自动检测交互点失败: " + ex.Message));
+			return new OptionItem[0];
+		}
+	}
+
+	private static bool HasInvokableOnClick(object component)
+	{
+		if (component == null)
+		{
+			return false;
+		}
+		Type type = component.GetType();
+		FieldInfo field = type.GetField("onClick", BindingFlags.Instance | BindingFlags.Public) ?? type.GetField("onClick", BindingFlags.Instance | BindingFlags.NonPublic);
+		object obj = field?.GetValue(component);
+		if (obj != null && obj.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public) != null)
+		{
+			return true;
+		}
+		PropertyInfo property = type.GetProperty("onClick", BindingFlags.Instance | BindingFlags.Public);
+		obj = property?.GetValue(component);
+		return obj != null && obj.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public) != null;
+	}
+
 	private static void SpeakQTEPrompt(object qteController, bool allowRecentRepeat)
 	{
 		try
@@ -4863,99 +4938,6 @@ public class Plugin : BaseUnityPlugin
 		string text = (_autoQTEEnabled ? "已开启" : "已关闭");
 		Log.LogInfo((object)("自动过 QTE 模式: " + text));
 		TolkHelper.Speak("自动过 QTE " + text, interrupt: true);
-	}
-
-	private static void SkipExploreScene()
-	{
-		try
-		{
-			Log.LogInfo((object)"【一键过探索场景】开始执行...");
-			TolkHelper.Speak("正在尝试一键过探索场景", interrupt: true);
-			ResolveTriggerAreaTypes();
-			if (_triggerAreaType != null)
-			{
-				Array array = FindObjectsOfType(_triggerAreaType);
-				if (array != null && array.Length > 0)
-				{
-					Log.LogInfo((object)$"找到 {array.Length} 个 TriggerArea 实例");
-					int num = 0;
-					foreach (object item in array)
-					{
-						try
-						{
-							FieldInfo field = _triggerAreaType.GetField("onClick", BindingFlags.Instance | BindingFlags.Public);
-							if (field == null)
-							{
-								field = _triggerAreaType.GetField("onClick", BindingFlags.Instance | BindingFlags.NonPublic);
-							}
-							if (!(field != null))
-							{
-								continue;
-							}
-							object value = field.GetValue(item);
-							if (value != null)
-							{
-								MethodInfo method = value.GetType().GetMethod("Invoke");
-								if (method != null)
-								{
-									method.Invoke(value, null);
-									num++;
-									Log.LogInfo((object)"成功触发一个 TriggerArea 的 onClick 事件");
-									Thread.Sleep(100);
-								}
-							}
-						}
-						catch (Exception ex)
-						{
-							Log.LogWarning((object)("处理单个 TriggerArea 失败: " + ex.Message));
-						}
-					}
-					if (num > 0)
-					{
-						Log.LogInfo((object)$"【一键过探索场景】成功触发 {num} 个交互点");
-						TolkHelper.Speak($"已触发 {num} 个交互点", interrupt: true);
-						return;
-					}
-					Log.LogInfo((object)"精准版触发失败，回退到万能版");
-				}
-				else
-				{
-					Log.LogInfo((object)"没有找到 TriggerArea 实例，回退到万能版");
-				}
-			}
-			else
-			{
-				Log.LogInfo((object)"TriggerArea 类型未找到，回退到万能版");
-			}
-			Log.LogInfo((object)"【探索场景尝试】万能版：快速点击屏幕多个位置");
-			int systemMetrics = GetSystemMetrics(0);
-			int systemMetrics2 = GetSystemMetrics(1);
-			int x = systemMetrics / 2;
-			int y = systemMetrics2 / 2;
-			ClickAt(x, y);
-			Thread.Sleep(100);
-			ClickAt(systemMetrics / 4, systemMetrics2 / 4);
-			Thread.Sleep(100);
-			ClickAt(systemMetrics * 3 / 4, systemMetrics2 / 4);
-			Thread.Sleep(100);
-			ClickAt(systemMetrics / 4, systemMetrics2 * 3 / 4);
-			Thread.Sleep(100);
-			ClickAt(systemMetrics * 3 / 4, systemMetrics2 * 3 / 4);
-			Thread.Sleep(100);
-			for (int i = 0; i < 10; i++)
-			{
-				ClickAt(x, y);
-				Thread.Sleep(50);
-			}
-			Log.LogInfo((object)"【一键过探索场景】万能尝试执行完毕");
-			TolkHelper.Speak("探索场景尝试完成", interrupt: true);
-		}
-		catch (Exception ex2)
-		{
-			Log.LogError((object)("【一键过探索场景】异常: " + ex2.GetType().Name + " - " + ex2.Message));
-			Log.LogError((object)("堆栈: " + ex2.StackTrace));
-			TolkHelper.Speak("跳过探索场景时出错", interrupt: true);
-		}
 	}
 
 	private static void TryAutoQTE()
@@ -5362,23 +5344,6 @@ public class Plugin : BaseUnityPlugin
 					log6.LogInfo((object)"[快捷键] F11 按下 - 切换自动过 QTE 模式");
 				}
 				ToggleAutoQTE();
-				_suppressCurrentKey = true;
-				break;
-			}
-			case 115:
-			{
-				if (_inSettingsMode)
-				{
-					LogInputState("F4 ignored in settings");
-					_suppressCurrentKey = true;
-					break;
-				}
-				ManualLogSource log4 = Log;
-				if (log4 != null)
-				{
-					log4.LogInfo((object)"[快捷键] F4 按下 - 一键过探索场景");
-				}
-				SkipExploreScene();
 				_suppressCurrentKey = true;
 				break;
 			}
