@@ -103,6 +103,12 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool _subtitleTypesResolved = false;
 
+	private static Type _narrationManagerType;
+
+	private static bool _narrationTypesResolved = false;
+
+	private static string _lastNarrationSpeakText = "";
+
 	private static UIState _currentUIState = UIState.Unknown;
 
 	private static bool _needDetect = true;
@@ -588,6 +594,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (IsGameWindowActive() && _needDetect)
 			{
+				CheckNarrationSpeak();
 				_needDetect = false;
 				DetectUIState();
 			}
@@ -4572,6 +4579,181 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
+	private static void ResolveNarrationTypes()
+	{
+		if (_narrationTypesResolved)
+		{
+			return;
+		}
+		_narrationTypesResolved = true;
+		try
+		{
+			_narrationManagerType = Type.GetType("NarrationManager, Assembly-CSharp");
+			if (_narrationManagerType != null)
+			{
+				Log.LogInfo((object)"找到 NarrationManager 类型");
+			}
+			else
+			{
+				Log.LogWarning((object)"未找到 NarrationManager 类型，剧情旁白强制朗读不可用");
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogError((object)("解析剧情旁白类型失败: " + ex.Message));
+		}
+	}
+
+	private static void CheckNarrationSpeak()
+	{
+		try
+		{
+			ResolveNarrationTypes();
+			if (_narrationManagerType == null)
+			{
+				return;
+			}
+			Array array = FindObjectsOfType(_narrationManagerType);
+			if (array == null || array.Length == 0)
+			{
+				return;
+			}
+			foreach (object item in array)
+			{
+				SpeakCurrentNarration(item);
+			}
+		}
+		catch (Exception ex)
+		{
+			ManualLogSource log = Log;
+			if (log != null)
+			{
+				log.LogDebug((object)("剧情旁白轮询失败: " + ex.Message));
+			}
+		}
+	}
+
+	private static void SpeakCurrentNarration(object manager)
+	{
+		if (manager == null)
+		{
+			return;
+		}
+		object fieldValue = GetFieldValue(manager, "isNarrationActive");
+		if (fieldValue is bool && !(bool)fieldValue)
+		{
+			_lastNarrationSpeakText = "";
+			return;
+		}
+		string text = GetTextFromTextComponent(GetFieldValue(manager, "specialText"));
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			string text2 = GetTextFromTextComponent(GetFieldValue(manager, "titleText"));
+			string text3 = GetTextFromTextComponent(GetFieldValue(manager, "contentText"));
+			text = JoinSpeechParts(text2, text3);
+		}
+		text = NormalizeSpeechText(text);
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			_lastNarrationSpeakText = "";
+			return;
+		}
+		if (text == _lastNarrationSpeakText)
+		{
+			return;
+		}
+		_lastNarrationSpeakText = text;
+		_lastSpokenText = text;
+		TolkHelper.Speak(text, interrupt: true);
+		ManualLogSource log = Log;
+		if (log != null)
+		{
+			log.LogInfo((object)("[剧情旁白] 强制朗读: " + text));
+		}
+		MarkNeedDetect();
+	}
+
+	private static bool IsNarrationTextComponent(object textComponent)
+	{
+		if (textComponent == null)
+		{
+			return false;
+		}
+		try
+		{
+			ResolveNarrationTypes();
+			if (_narrationManagerType == null)
+			{
+				return false;
+			}
+			Array array = FindObjectsOfType(_narrationManagerType);
+			if (array == null || array.Length == 0)
+			{
+				return false;
+			}
+			foreach (object item in array)
+			{
+				if (item == null)
+				{
+					continue;
+				}
+				if (textComponent == GetFieldValue(item, "titleText") || textComponent == GetFieldValue(item, "contentText") || textComponent == GetFieldValue(item, "specialText"))
+				{
+					return true;
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			ManualLogSource log = Log;
+			if (log != null)
+			{
+				log.LogDebug((object)("判断旁白文本组件失败: " + ex.Message));
+			}
+		}
+		return false;
+	}
+
+	private static string GetTextFromTextComponent(object textComponent)
+	{
+		if (textComponent == null)
+		{
+			return "";
+		}
+		PropertyInfo property = textComponent.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
+		object obj = property?.GetValue(textComponent);
+		PropertyInfo property2 = obj?.GetType().GetProperty("activeInHierarchy", BindingFlags.Instance | BindingFlags.Public);
+		if (property2 != null && !(bool)property2.GetValue(obj))
+		{
+			return "";
+		}
+		PropertyInfo property3 = textComponent.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public);
+		return (property3?.GetValue(textComponent) as string) ?? "";
+	}
+
+	private static string JoinSpeechParts(params string[] parts)
+	{
+		List<string> list = new List<string>();
+		foreach (string text in parts)
+		{
+			string text2 = NormalizeSpeechText(text);
+			if (!string.IsNullOrWhiteSpace(text2))
+			{
+				list.Add(text2);
+			}
+		}
+		return string.Join("。", list.ToArray());
+	}
+
+	private static string NormalizeSpeechText(string text)
+	{
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			return "";
+		}
+		return text.Replace("\r", " ").Replace("\n", " ").Trim();
+	}
+
 	private static void ApplyQTEPatches(Harmony harmony)
 	{
 		//IL_00a1: Unknown result type (might be due to invalid IL or missing references)
@@ -6765,6 +6947,11 @@ public class Plugin : BaseUnityPlugin
 						Log.LogDebug((object)("跳过字幕文本: " + text));
 						continue;
 					}
+					if (IsNarrationTextComponent(item))
+					{
+						Log.LogDebug((object)("跳过剧情旁白文本: " + text));
+						continue;
+					}
 					object obj2 = null;
 					try
 					{
@@ -7000,4 +7187,3 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 }
-
