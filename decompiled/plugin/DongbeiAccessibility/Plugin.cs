@@ -4511,7 +4511,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			else
 			{
-				Log.LogWarning((object)"未找到 TriggerArea 类型，探索场景一键跳过不可用");
+				Log.LogWarning((object)"未找到 TriggerArea 类型，探索交互点自动检测不可用");
 			}
 		}
 		catch (Exception ex)
@@ -5103,7 +5103,7 @@ public class Plugin : BaseUnityPlugin
 				TolkHelper.Speak("QTE 已跳过", interrupt: true);
 				return;
 			}
-			Log.LogInfo((object)"精准版跳过失败，不再执行万能 QTE 尝试");
+			Log.LogInfo((object)"精准跳过失败，旧版乱试 QTE 逻辑已移除");
 			TolkHelper.Speak("没有找到可精准跳过的 QTE", interrupt: true);
 		}
 		catch (Exception ex2)
@@ -5120,66 +5120,6 @@ public class Plugin : BaseUnityPlugin
 		string text = (_autoQTEEnabled ? "已开启" : "已关闭");
 		Log.LogInfo((object)("自动过 QTE 模式: " + text));
 		TolkHelper.Speak("自动过 QTE " + text, interrupt: true);
-	}
-
-	private static void TryAutoQTE()
-	{
-		Log.LogInfo((object)"【一键过 QTE】开始执行万能 QTE 破解...");
-		TolkHelper.Speak("正在尝试自动过 QTE", interrupt: true);
-		Log.LogInfo((object)"【QTE 尝试】方案一：快速连按空格");
-		for (int i = 0; i < 20; i++)
-		{
-			keybd_event(32, 0, 0u, UIntPtr.Zero);
-			Thread.Sleep(10);
-			keybd_event(32, 0, 2u, UIntPtr.Zero);
-			Thread.Sleep(10);
-		}
-		Log.LogInfo((object)"【QTE 尝试】方案二：快速连按回车");
-		for (int j = 0; j < 10; j++)
-		{
-			keybd_event(13, 0, 0u, UIntPtr.Zero);
-			Thread.Sleep(20);
-			keybd_event(13, 0, 2u, UIntPtr.Zero);
-			Thread.Sleep(20);
-		}
-		Log.LogInfo((object)"【QTE 尝试】方案三：模拟鼠标快速左右拖动");
-		int num = GetSystemMetrics(0) / 2;
-		int num2 = GetSystemMetrics(1) / 2;
-		SetCursorPos(num - 100, num2);
-		Thread.Sleep(10);
-		mouse_event(2u, 0u, 0u, 0u, 0u);
-		Thread.Sleep(10);
-		for (int k = 0; k < 5; k++)
-		{
-			SetCursorPos(num + 100, num2);
-			Thread.Sleep(20);
-			SetCursorPos(num - 100, num2);
-			Thread.Sleep(20);
-		}
-		mouse_event(4u, 0u, 0u, 0u, 0u);
-		Log.LogInfo((object)"【QTE 尝试】方案四：模拟鼠标快速上下拖动");
-		SetCursorPos(num, num2 - 100);
-		Thread.Sleep(10);
-		mouse_event(2u, 0u, 0u, 0u, 0u);
-		Thread.Sleep(10);
-		for (int l = 0; l < 5; l++)
-		{
-			SetCursorPos(num, num2 + 100);
-			Thread.Sleep(20);
-			SetCursorPos(num, num2 - 100);
-			Thread.Sleep(20);
-		}
-		mouse_event(4u, 0u, 0u, 0u, 0u);
-		Log.LogInfo((object)"【QTE 尝试】方案五：快速连点鼠标左键");
-		for (int m = 0; m < 20; m++)
-		{
-			mouse_event(2u, 0u, 0u, 0u, 0u);
-			Thread.Sleep(10);
-			mouse_event(4u, 0u, 0u, 0u, 0u);
-			Thread.Sleep(10);
-		}
-		Log.LogInfo((object)"【一键过 QTE】万能尝试执行完毕");
-		TolkHelper.Speak("QTE 尝试完成", interrupt: true);
 	}
 
 	private static void ExploreCodeForQTE()
