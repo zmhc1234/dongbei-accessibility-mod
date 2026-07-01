@@ -4713,16 +4713,26 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
-	private static void EnterNodeModeAfterChapterClick()
+	private static void EnterNodeModeAfterChapterClick(int expectedChapterNumber)
 	{
 		ThreadPool.QueueUserWorkItem(delegate
 		{
 			for (int i = 0; i < 8; i++)
 			{
-				Thread.Sleep(250);
+				Thread.Sleep(125);
 				try
 				{
 					MarkNeedDetect();
+					int currentStorylineChapterFilter = GetCurrentStorylineChapterFilter();
+					if (expectedChapterNumber > 0 && currentStorylineChapterFilter != expectedChapterNumber)
+					{
+						ManualLogSource log0 = Log;
+						if (log0 != null)
+						{
+							log0.LogInfo((object)$"[故事线] 等待章节筛选同步: current={currentStorylineChapterFilter}, expected={expectedChapterNumber}, try={i + 1}/8");
+						}
+						continue;
+					}
 					OptionItem[] storylineNodes = GetStorylineNodes();
 					if (storylineNodes.Length > 0)
 					{
@@ -4734,7 +4744,7 @@ public class Plugin : BaseUnityPlugin
 						ManualLogSource log = Log;
 						if (log != null)
 						{
-							log.LogInfo((object)$"[故事线] 点击章节后自动进入节点浏览模式，共 {storylineNodes.Length} 个节点");
+							log.LogInfo((object)$"[故事线] 点击章节后自动进入节点浏览模式，共 {storylineNodes.Length} 个节点，章节={currentStorylineChapterFilter}");
 						}
 						return;
 					}
@@ -4751,9 +4761,51 @@ public class Plugin : BaseUnityPlugin
 			ManualLogSource log3 = Log;
 			if (log3 != null)
 			{
-				log3.LogWarning((object)"[故事线] 点击章节后没有找到节点，保持章节选择模式");
+				log3.LogWarning((object)$"[故事线] 点击章节后没有等到目标章节节点，保持章节选择模式，expected={expectedChapterNumber}, current={GetCurrentStorylineChapterFilter()}");
 			}
+			TolkHelper.Speak("章节还没有加载完成，请稍后再按回车进入", interrupt: true);
 		});
+	}
+
+	private static bool TryEnterStorylineChapterDirect(int chapterNumber)
+	{
+		if (chapterNumber <= 0)
+		{
+			return false;
+		}
+		try
+		{
+			ResolveStorylineTypes();
+			object obj = GetActiveObject(_chapterStorylineControllerType);
+			MethodInfo method = _chapterStorylineControllerType?.GetMethod("ShowChapterStoryline", BindingFlags.Instance | BindingFlags.Public);
+			if (obj != null && method != null)
+			{
+				method.Invoke(obj, new object[1] { chapterNumber });
+				Log.LogInfo((object)$"[故事线] 直接调用 ShowChapterStoryline({chapterNumber})");
+			}
+			else
+			{
+				object activeObject = GetActiveObject(_progressTreeGraphControllerType);
+				if (activeObject == null)
+				{
+					return false;
+				}
+				MethodInfo method2 = _progressTreeGraphControllerType.GetMethod("SetChapterFilter", BindingFlags.Instance | BindingFlags.Public);
+				MethodInfo method3 = _progressTreeGraphControllerType.GetMethod("Redraw", BindingFlags.Instance | BindingFlags.Public);
+				method2?.Invoke(activeObject, new object[1] { chapterNumber });
+				method3?.Invoke(activeObject, null);
+				Log.LogInfo((object)$"[故事线] 直接设置章节筛选并重绘: {chapterNumber}");
+			}
+			object activeObject2 = GetActiveObject(_storylineUIManagerType);
+			MethodInfo method4 = _storylineUIManagerType?.GetMethod("SyncChapterContextAfterChapterChange", BindingFlags.Instance | BindingFlags.Public);
+			method4?.Invoke(activeObject2, new object[1] { chapterNumber });
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("[故事线] 直接进入章节失败，回退到按钮事件: " + ex.Message));
+			return false;
+		}
 	}
 
 	private static void ReturnToChapterSelectionFromNodeMode()
@@ -6443,6 +6495,7 @@ public class Plugin : BaseUnityPlugin
 			if (flag2)
 			{
 				ClearNodeMode("Click storyline chapter");
+				TryEnterStorylineChapterDirect(optionItem.ChapterInfo?.ChapterNumber ?? 0);
 			}
 			if (optionItem.Index >= 0 && optionItem.ClickableComponent != null && _gameControllerType != null && optionItem.ClickableComponent.GetType() == _gameControllerType)
 			{
@@ -6495,7 +6548,7 @@ public class Plugin : BaseUnityPlugin
 					}
 					if (flag2)
 					{
-						EnterNodeModeAfterChapterClick();
+						EnterNodeModeAfterChapterClick(optionItem.ChapterInfo?.ChapterNumber ?? 0);
 					}
 					return;
 				}
@@ -6515,7 +6568,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (flag2)
 			{
-				EnterNodeModeAfterChapterClick();
+				EnterNodeModeAfterChapterClick(optionItem.ChapterInfo?.ChapterNumber ?? 0);
 			}
 		}
 		else
