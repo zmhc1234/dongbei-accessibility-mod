@@ -24,7 +24,8 @@ public class Plugin : BaseUnityPlugin
 		Dialogue,
 		Options,
 		Settings,
-		QTE
+		QTE,
+		Archive
 	}
 
 	private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -148,6 +149,26 @@ public class Plugin : BaseUnityPlugin
 	private static DateTime _ignoreSettingsUntilUtc = DateTime.MinValue;
 
 	private static DateTime _ignoreOptionsUntilUtc = DateTime.MinValue;
+
+	private static Type _archiveHomePageControllerType;
+
+	private static Type _characterDetailPageControllerType;
+
+	private static Type _archiveContentPageControllerType;
+
+	private static Type _characterCardType;
+
+	private static Type _archiveListItemType;
+
+	private static bool _archiveTypesResolved = false;
+
+	private static bool _inArchiveMode;
+
+	private static OptionItem[] _archiveItems = new OptionItem[0];
+
+	private static int _currentArchiveIndex;
+
+	private static string _archiveModeName = "";
 
 	private const int WH_KEYBOARD_LL = 13;
 
@@ -663,6 +684,11 @@ public class Plugin : BaseUnityPlugin
 				uIState = UIState.Settings;
 				text = GetSettingsSignature();
 			}
+			else if (IsInArchivePage())
+			{
+				uIState = UIState.Archive;
+				text = GetArchiveSignature();
+			}
 			else if (DateTime.UtcNow < _ignoreOptionsUntilUtc)
 			{
 				uIState = UIState.Dialogue;
@@ -704,7 +730,7 @@ public class Plugin : BaseUnityPlugin
 			LogInputState("DetectUIState raw=" + uIState + ", signature=" + text);
 			if (_currentUIState == UIState.Storyline && uIState != UIState.Storyline)
 			{
-				if (uIState == UIState.Options || uIState == UIState.Settings || uIState == UIState.QTE || uIState == UIState.Dialogue)
+				if (uIState == UIState.Options || uIState == UIState.Settings || uIState == UIState.QTE || uIState == UIState.Archive || uIState == UIState.Dialogue)
 				{
 					Log.LogInfo((object)$"[防抖] 故事线切换到明确界面 {uIState}，立即切换");
 					_storylineMissCount = 0;
@@ -735,7 +761,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			else if (_currentUIState == UIState.Options && uIState != UIState.Options)
 			{
-				if (uIState == UIState.Settings || uIState == UIState.Storyline || uIState == UIState.QTE || uIState == UIState.Dialogue || AreCurrentOptionsFromGameController())
+				if (uIState == UIState.Settings || uIState == UIState.Storyline || uIState == UIState.QTE || uIState == UIState.Archive || uIState == UIState.Dialogue || AreCurrentOptionsFromGameController())
 				{
 					Log.LogInfo((object)$"[防抖] 选项切换到明确界面 {uIState}，立即切换");
 					_optionsMissCount = 0;
@@ -796,6 +822,10 @@ public class Plugin : BaseUnityPlugin
 			case UIState.Settings:
 				Log.LogInfo((object)"进入设置界面");
 				EnterSettingsMode();
+				break;
+			case UIState.Archive:
+				Log.LogInfo((object)"进入档案界面");
+				EnterArchiveMode();
 				break;
 			case UIState.QTE:
 				Log.LogInfo((object)"检测到 QTE");
@@ -859,6 +889,501 @@ public class Plugin : BaseUnityPlugin
 			Log.LogDebug((object)("检测 QTE 激活状态失败: " + ex.Message));
 			return false;
 		}
+	}
+
+	private static void ResolveArchiveTypes()
+	{
+		if (_archiveTypesResolved)
+		{
+			return;
+		}
+		_archiveTypesResolved = true;
+		try
+		{
+			_archiveHomePageControllerType = Type.GetType("ArchiveHomePageController, Assembly-CSharp");
+			_characterDetailPageControllerType = Type.GetType("CharacterDetailPageController, Assembly-CSharp");
+			_archiveContentPageControllerType = Type.GetType("ArchiveContentPageController, Assembly-CSharp");
+			_characterCardType = Type.GetType("CharacterCard, Assembly-CSharp");
+			_archiveListItemType = Type.GetType("ArchiveListItem, Assembly-CSharp");
+			Log.LogInfo((object)($"档案类型解析: home={_archiveHomePageControllerType != null}, detail={_characterDetailPageControllerType != null}, content={_archiveContentPageControllerType != null}, card={_characterCardType != null}, item={_archiveListItemType != null}"));
+		}
+		catch (Exception ex)
+		{
+			Log.LogError((object)("解析档案类型失败: " + ex.Message));
+		}
+	}
+
+	private static bool IsInArchivePage()
+	{
+		ResolveArchiveTypes();
+		object activeArchiveContentController = GetActiveArchiveContentController();
+		if (activeArchiveContentController != null && HasArchiveContentVisibleText(activeArchiveContentController))
+		{
+			return true;
+		}
+		object activeCharacterDetailController = GetActiveCharacterDetailController();
+		if (activeCharacterDetailController != null && GetArchiveDetailItems(activeCharacterDetailController).Length > 0)
+		{
+			return true;
+		}
+		object activeArchiveHomeController = GetActiveArchiveHomeController();
+		return activeArchiveHomeController != null && GetArchiveHomeItems(activeArchiveHomeController).Length > 0;
+	}
+
+	private static string GetArchiveSignature()
+	{
+		try
+		{
+			object activeArchiveContentController = GetActiveArchiveContentController();
+			if (activeArchiveContentController != null)
+			{
+				string archiveContentTitle = GetArchiveContentTitle(activeArchiveContentController);
+				return "archive_content_" + archiveContentTitle;
+			}
+			object activeCharacterDetailController = GetActiveCharacterDetailController();
+			if (activeCharacterDetailController != null)
+			{
+				OptionItem[] archiveDetailItems = GetArchiveDetailItems(activeCharacterDetailController);
+				return "archive_detail_" + GetTextComponentText(GetFieldValue(activeCharacterDetailController, "characterNameText")) + "_" + archiveDetailItems.Length;
+			}
+			object activeArchiveHomeController = GetActiveArchiveHomeController();
+			if (activeArchiveHomeController != null)
+			{
+				OptionItem[] archiveHomeItems = GetArchiveHomeItems(activeArchiveHomeController);
+				return "archive_home_" + archiveHomeItems.Length;
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("获取档案签名失败: " + ex.Message));
+		}
+		return "archive";
+	}
+
+	private static object GetActiveArchiveHomeController()
+	{
+		return GetActiveComponentObject(_archiveHomePageControllerType);
+	}
+
+	private static object GetActiveCharacterDetailController()
+	{
+		return GetActiveComponentObject(_characterDetailPageControllerType);
+	}
+
+	private static object GetActiveArchiveContentController()
+	{
+		return GetActiveComponentObject(_archiveContentPageControllerType);
+	}
+
+	private static object GetActiveComponentObject(Type type)
+	{
+		if (type == null)
+		{
+			return null;
+		}
+		try
+		{
+			Array array = FindObjectsOfType(type);
+			if (array == null)
+			{
+				return null;
+			}
+			foreach (object item in array)
+			{
+				if (item != null && IsComponentActiveInHierarchy(item))
+				{
+					return item;
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[档案] 查找可见组件失败: " + ex.Message));
+		}
+		return null;
+	}
+
+	private static void EnterArchiveMode()
+	{
+		try
+		{
+			_inOptionsMode = false;
+			_options = new OptionItem[0];
+			_currentOptionIndex = 0;
+			_inSettingsMode = false;
+			_settings = new SettingItem[0];
+			_currentSettingIndex = 0;
+			ClearNodeMode("Enter archive");
+			object activeArchiveContentController = GetActiveArchiveContentController();
+			if (activeArchiveContentController != null)
+			{
+				_inArchiveMode = true;
+				_archiveModeName = "Content";
+				_archiveItems = new OptionItem[0];
+				_currentArchiveIndex = 0;
+				SpeakArchiveContent(activeArchiveContentController);
+				return;
+			}
+			object activeCharacterDetailController = GetActiveCharacterDetailController();
+			if (activeCharacterDetailController != null)
+			{
+				OptionItem[] archiveDetailItems = GetArchiveDetailItems(activeCharacterDetailController);
+				SetArchiveItems("Detail", archiveDetailItems, "档案详情");
+				return;
+			}
+			object activeArchiveHomeController = GetActiveArchiveHomeController();
+			if (activeArchiveHomeController != null)
+			{
+				OptionItem[] archiveHomeItems = GetArchiveHomeItems(activeArchiveHomeController);
+				SetArchiveItems("Home", archiveHomeItems, "档案首页");
+				return;
+			}
+			LeaveArchiveMode();
+		}
+		catch (Exception ex)
+		{
+			Log.LogError((object)("进入档案模式失败: " + ex.Message));
+			TolkHelper.Speak("档案界面", interrupt: true);
+		}
+	}
+
+	private static void SetArchiveItems(string mode, OptionItem[] items, string label)
+	{
+		_inArchiveMode = true;
+		_archiveModeName = mode;
+		_archiveItems = items ?? new OptionItem[0];
+		_currentArchiveIndex = 0;
+		Log.LogInfo((object)$"进入{label}模式，共 {_archiveItems.Length} 项");
+		if (_archiveItems.Length > 0)
+		{
+			TolkHelper.Speak($"{label}，共 {_archiveItems.Length} 项。按上下光标切换，回车打开，Esc 返回", interrupt: true);
+			SpeakCurrentArchiveItem();
+		}
+		else
+		{
+			TolkHelper.Speak(label + "，没有找到可读项目。按 Esc 返回", interrupt: true);
+		}
+	}
+
+	private static OptionItem[] GetArchiveHomeItems(object controller)
+	{
+		List<OptionItem> list = new List<OptionItem>();
+		try
+		{
+			object fieldValue = GetFieldValue(controller, "characterCards");
+			IEnumerable<object> enumerable = EnumerateObjects(fieldValue);
+			int num = 0;
+			foreach (object item in enumerable)
+			{
+				if (item == null || !IsComponentActiveInHierarchy(item))
+				{
+					continue;
+				}
+				string text = InvokeString(item, "GetCharacterName");
+				object fieldValue2 = GetFieldValue(item, "characterProfile");
+				string text2 = InvokeString(fieldValue2, "GetUnlockProgressText");
+				if (!string.IsNullOrWhiteSpace(text2))
+				{
+					text = text + "，解锁 " + text2;
+				}
+				if (string.IsNullOrWhiteSpace(text))
+				{
+					text = "角色 " + (num + 1);
+				}
+				list.Add(new OptionItem
+				{
+					Text = text,
+					ClickableComponent = item,
+					Index = num
+				});
+				num++;
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("[档案] 获取角色卡片失败: " + ex.Message));
+		}
+		return list.ToArray();
+	}
+
+	private static OptionItem[] GetArchiveDetailItems(object controller)
+	{
+		List<OptionItem> list = new List<OptionItem>();
+		try
+		{
+			object fieldValue = GetFieldValue(controller, "archiveListItems");
+			int num = 0;
+			foreach (object item in EnumerateObjects(fieldValue))
+			{
+				if (item == null || !IsComponentActiveInHierarchy(item))
+				{
+					num++;
+					continue;
+				}
+				string archiveListItemText = GetArchiveListItemText(item, num);
+				list.Add(new OptionItem
+				{
+					Text = archiveListItemText,
+					ClickableComponent = item,
+					Index = num
+				});
+				num++;
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("[档案] 获取档案条目失败: " + ex.Message));
+		}
+		return list.ToArray();
+	}
+
+	private static string GetArchiveListItemText(object item, int index)
+	{
+		object fieldValue = GetFieldValue(item, "archiveEntry");
+		string text = InvokeString(fieldValue, "GetDisplayTitle");
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			text = GetTextComponentText(GetFieldValue(item, "titleText"));
+		}
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			text = "档案 " + (index + 1);
+		}
+		bool flag = false;
+		try
+		{
+			object obj = GetFieldValue(item, "clickButton");
+			PropertyInfo property = obj?.GetType().GetProperty("interactable", BindingFlags.Instance | BindingFlags.Public);
+			if (property != null)
+			{
+				flag = (bool)property.GetValue(obj);
+			}
+		}
+		catch
+		{
+		}
+		return flag ? text : (text + "，未解锁");
+	}
+
+	private static void SpeakArchiveContent(object controller)
+	{
+		string archiveContentTitle = GetArchiveContentTitle(controller);
+		string textComponentText = GetTextComponentText(GetFieldValue(controller, "characterNameText"));
+		string textComponentText2 = GetTextComponentText(GetFieldValue(controller, "archiveContentText"));
+		string text = "";
+		if (!string.IsNullOrWhiteSpace(textComponentText))
+		{
+			text += textComponentText + "。";
+		}
+		if (!string.IsNullOrWhiteSpace(archiveContentTitle))
+		{
+			text += archiveContentTitle + "。";
+		}
+		if (!string.IsNullOrWhiteSpace(textComponentText2))
+		{
+			text += textComponentText2;
+		}
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			text = "档案内容页。按左右光标切换档案，Esc 返回";
+		}
+		else
+		{
+			text += "。按左右光标切换档案，Esc 返回";
+		}
+		TolkHelper.Speak(text, interrupt: true);
+	}
+
+	private static string GetArchiveContentTitle(object controller)
+	{
+		return GetTextComponentText(GetFieldValue(controller, "archiveTitleText"));
+	}
+
+	private static bool HasArchiveContentVisibleText(object controller)
+	{
+		if (controller == null)
+		{
+			return false;
+		}
+		return !string.IsNullOrWhiteSpace(GetArchiveContentTitle(controller)) || !string.IsNullOrWhiteSpace(GetTextComponentText(GetFieldValue(controller, "archiveContentText")));
+	}
+
+	private static bool HandleArchiveKey(int vkCode)
+	{
+		if (!_inArchiveMode && _currentUIState != UIState.Archive)
+		{
+			return false;
+		}
+		if (!IsInArchivePage())
+		{
+			LeaveArchiveMode();
+			return false;
+		}
+		switch (vkCode)
+		{
+		case VK_UP:
+			if (_archiveItems.Length > 0)
+			{
+				_currentArchiveIndex--;
+				if (_currentArchiveIndex < 0)
+				{
+					_currentArchiveIndex = _archiveItems.Length - 1;
+				}
+				SpeakCurrentArchiveItem();
+				_suppressCurrentKey = true;
+			}
+			return true;
+		case VK_DOWN:
+			if (_archiveItems.Length > 0)
+			{
+				_currentArchiveIndex++;
+				if (_currentArchiveIndex >= _archiveItems.Length)
+				{
+					_currentArchiveIndex = 0;
+				}
+				SpeakCurrentArchiveItem();
+				_suppressCurrentKey = true;
+			}
+			return true;
+		case VK_RETURN:
+			ActivateCurrentArchiveItem();
+			_suppressCurrentKey = true;
+			return true;
+		case VK_LEFT:
+			if (TryClickArchiveButton("leftArrowButton"))
+			{
+				MarkNeedDetect();
+				_suppressCurrentKey = true;
+				return true;
+			}
+			return false;
+		case VK_RIGHT:
+			if (TryClickArchiveButton("rightArrowButton"))
+			{
+				MarkNeedDetect();
+				_suppressCurrentKey = true;
+				return true;
+			}
+			return false;
+		case VK_ESCAPE:
+		case VK_BACK:
+			if (TryClickArchiveButton("returnButton"))
+			{
+				LeaveArchiveMode();
+				MarkNeedDetect();
+				_suppressCurrentKey = true;
+				return true;
+			}
+			return false;
+		default:
+			return false;
+		}
+	}
+
+	private static void SpeakCurrentArchiveItem()
+	{
+		if (_archiveItems == null || _archiveItems.Length == 0)
+		{
+			TolkHelper.Speak("没有档案项目", interrupt: true);
+			return;
+		}
+		if (_currentArchiveIndex < 0)
+		{
+			_currentArchiveIndex = 0;
+		}
+		if (_currentArchiveIndex >= _archiveItems.Length)
+		{
+			_currentArchiveIndex = _archiveItems.Length - 1;
+		}
+		OptionItem optionItem = _archiveItems[_currentArchiveIndex];
+		string text = string.IsNullOrWhiteSpace(optionItem.Text) ? ("第 " + (_currentArchiveIndex + 1) + " 项") : optionItem.Text;
+		PlayGameSound("Highlight");
+		TolkHelper.Speak($"{_currentArchiveIndex + 1} / {_archiveItems.Length}: {text}", interrupt: true);
+	}
+
+	private static void ActivateCurrentArchiveItem()
+	{
+		if (_archiveItems == null || _archiveItems.Length == 0)
+		{
+			TolkHelper.Speak("没有可打开的档案项目", interrupt: true);
+			return;
+		}
+		OptionItem optionItem = _archiveItems[Mathf.Clamp(_currentArchiveIndex, 0, _archiveItems.Length - 1)];
+		if (optionItem == null || optionItem.ClickableComponent == null)
+		{
+			TolkHelper.Speak("当前档案项目不可打开", interrupt: true);
+			return;
+		}
+		PlayGameSound("Click");
+		TolkHelper.Speak("打开 " + optionItem.Text, interrupt: true);
+		if (ClickArchiveItem(optionItem.ClickableComponent))
+		{
+			MarkNeedDetect();
+		}
+		else
+		{
+			TolkHelper.Speak("打开失败", interrupt: true);
+		}
+	}
+
+	private static bool TryClickArchiveButton(string fieldName)
+	{
+		object activeArchiveContentController = GetActiveArchiveContentController();
+		object activeCharacterDetailController = GetActiveCharacterDetailController();
+		object activeArchiveHomeController = GetActiveArchiveHomeController();
+		object obj = GetFieldValue(activeArchiveContentController, fieldName) ?? GetFieldValue(activeCharacterDetailController, fieldName) ?? GetFieldValue(activeArchiveHomeController, fieldName);
+		if (obj == null)
+		{
+			return false;
+		}
+		PlayGameSound(fieldName == "returnButton" ? "Back" : "Highlight");
+		return ClickComponent(obj);
+	}
+
+	private static bool ClickArchiveItem(object component)
+	{
+		if (component == null)
+		{
+			return false;
+		}
+		try
+		{
+			object obj = GetFieldValue(component, "cardButton") ?? GetFieldValue(component, "clickButton");
+			if (obj != null && ClickComponent(obj))
+			{
+				Log.LogInfo((object)("[档案] 已点击内部按钮: " + component.GetType().Name));
+				return true;
+			}
+			string text = null;
+			Type type = component.GetType();
+			if (_characterCardType != null && type == _characterCardType)
+			{
+				text = "OnCardButtonClicked";
+			}
+			else if (_archiveListItemType != null && type == _archiveListItemType)
+			{
+				text = "OnButtonClicked";
+			}
+			if (!string.IsNullOrEmpty(text) && InvokeNoArg(component, text))
+			{
+				Log.LogInfo((object)("[档案] 已调用内部点击方法: " + type.Name + "." + text));
+				return true;
+			}
+			return ClickComponent(component);
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("[档案] 点击档案项目失败: " + ex.Message));
+			return false;
+		}
+	}
+
+	private static void LeaveArchiveMode()
+	{
+		_inArchiveMode = false;
+		_archiveItems = new OptionItem[0];
+		_currentArchiveIndex = 0;
+		_archiveModeName = "";
 	}
 
 	private static string GetStorylineSignature()
@@ -1989,6 +2514,47 @@ public class Plugin : BaseUnityPlugin
 		catch
 		{
 			return null;
+		}
+	}
+
+	private static IEnumerable<object> EnumerateObjects(object value)
+	{
+		if (value == null)
+		{
+			yield break;
+		}
+		if (value is System.Collections.IEnumerable enumerable && !(value is string))
+		{
+			foreach (object item in enumerable)
+			{
+				yield return item;
+			}
+		}
+		else
+		{
+			yield return value;
+		}
+	}
+
+	private static string InvokeString(object obj, string methodName)
+	{
+		if (obj == null || string.IsNullOrEmpty(methodName))
+		{
+			return "";
+		}
+		try
+		{
+			MethodInfo method = obj.GetType().GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, Type.EmptyTypes, null);
+			if (method == null)
+			{
+				return "";
+			}
+			object obj2 = method.Invoke(obj, null);
+			return obj2?.ToString() ?? "";
+		}
+		catch
+		{
+			return "";
 		}
 	}
 
@@ -5419,6 +5985,11 @@ public class Plugin : BaseUnityPlugin
 				LogInputState("After key " + vkCode);
 				return;
 			}
+			if (HandleArchiveKey(vkCode))
+			{
+				LogInputState("After archive key " + vkCode);
+				return;
+			}
 			switch (vkCode)
 			{
 			case 116:
@@ -6475,6 +7046,7 @@ public class Plugin : BaseUnityPlugin
 			_inNodeMode = false;
 			_storylineNodes = new OptionItem[0];
 			_currentNodeIndex = 0;
+			LeaveArchiveMode();
 			ManualLogSource log = Log;
 			if (log != null)
 			{
