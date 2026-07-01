@@ -149,10 +149,6 @@ public class Plugin : BaseUnityPlugin
 
 	private static DateTime _ignoreOptionsUntilUtc = DateTime.MinValue;
 
-	private static DateTime _steamOverlayRecoveryUntilUtc = DateTime.MinValue;
-
-	private static DateTime _lastSteamOverlayLogUtc = DateTime.MinValue;
-
 	private const int WH_KEYBOARD_LL = 13;
 
 	private const int WM_KEYDOWN = 256;
@@ -5359,12 +5355,10 @@ public class Plugin : BaseUnityPlugin
 			{
 				int num = Marshal.ReadInt32(lParam);
 				int num2 = Marshal.ReadInt32(lParam, 8);
-				ManualLogSource log = Log;
-				if (log != null)
+				if (!IsGameWindowActive())
 				{
-					log.LogDebug((object)$"[键盘钩子] 按键: 0x{num:X2}");
+					return CallNextHookEx(_hookId, nCode, wParam, lParam);
 				}
-				RecordSteamOverlayShortcut(num, wParam, num2);
 				if (wParam == (IntPtr)260 || (num2 & LLKHF_ALTDOWN) != 0)
 				{
 					ManualLogSource log6 = Log;
@@ -5374,18 +5368,10 @@ public class Plugin : BaseUnityPlugin
 					}
 					return CallNextHookEx(_hookId, nCode, wParam, lParam);
 				}
-				if (!IsGameWindowActive())
+				ManualLogSource log = Log;
+				if (log != null)
 				{
-					if (!ShouldHandleSteamOverlayForeground(num))
-					{
-						ManualLogSource log2 = Log;
-						if (log2 != null)
-						{
-							log2.LogDebug((object)"[键盘钩子] 游戏窗口不在前台，忽略按键");
-						}
-						return CallNextHookEx(_hookId, nCode, wParam, lParam);
-					}
-					LogSteamOverlayBypass(num);
+					log.LogDebug((object)$"[键盘钩子] 按键: 0x{num:X2}");
 				}
 				if (IsModifierKeyDown() && !IsModifierKey(num) && !ShouldHandleKeyEvenWithModifier(num))
 				{
@@ -5773,77 +5759,6 @@ public class Plugin : BaseUnityPlugin
 	private static bool ShouldHandleKeyEvenWithModifier(int vkCode)
 	{
 		return false;
-	}
-
-	private static void RecordSteamOverlayShortcut(int vkCode, IntPtr wParam, int flags)
-	{
-		try
-		{
-			bool flag = vkCode == VK_TAB && IsKeyDown(VK_SHIFT);
-			if (flag)
-			{
-				_steamOverlayRecoveryUntilUtc = DateTime.UtcNow.AddMinutes(2.0);
-				_needDetect = true;
-				Log.LogInfo((object)"[键盘钩子] 检测到 Shift+Tab，仅允许 Steam Overlay 前台临时处理导航");
-			}
-		}
-		catch
-		{
-		}
-	}
-
-	private static bool ShouldHandleSteamOverlayForeground(int vkCode)
-	{
-		if (DateTime.UtcNow > _steamOverlayRecoveryUntilUtc)
-		{
-			return false;
-		}
-		if (!IsSteamOverlayForeground())
-		{
-			return false;
-		}
-		return vkCode == VK_RETURN || vkCode == VK_ESCAPE || vkCode == VK_BACK || vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT || vkCode == VK_SPACE || vkCode == VK_D || vkCode == VK_F5 || vkCode == VK_F6 || vkCode == VK_F11 || IsDigitShortcut(vkCode);
-	}
-
-	private static bool IsSteamOverlayForeground()
-	{
-		try
-		{
-			IntPtr foregroundWindow = GetForegroundWindow();
-			if (foregroundWindow == IntPtr.Zero)
-			{
-				return false;
-			}
-			GetWindowThreadProcessId(foregroundWindow, out var lpdwProcessId);
-			if (lpdwProcessId == 0 || lpdwProcessId == _gameProcessId)
-			{
-				return false;
-			}
-			string processName = Process.GetProcessById((int)lpdwProcessId).ProcessName ?? "";
-			return processName.IndexOf("GameOverlayUI", StringComparison.OrdinalIgnoreCase) >= 0;
-		}
-		catch (Exception ex)
-		{
-			Log.LogDebug((object)("[键盘钩子] 检查 Steam Overlay 前台失败: " + ex.Message));
-			return false;
-		}
-	}
-
-	private static void LogSteamOverlayBypass(int vkCode)
-	{
-		try
-		{
-			DateTime utcNow = DateTime.UtcNow;
-			if ((utcNow - _lastSteamOverlayLogUtc).TotalSeconds < 2.0)
-			{
-				return;
-			}
-			_lastSteamOverlayLogUtc = utcNow;
-			Log.LogInfo((object)$"[键盘钩子] Steam Overlay 前台，继续处理游戏导航按键 0x{vkCode:X2}");
-		}
-		catch
-		{
-		}
 	}
 
 	private static bool IsKeyDown(int vkCode)
