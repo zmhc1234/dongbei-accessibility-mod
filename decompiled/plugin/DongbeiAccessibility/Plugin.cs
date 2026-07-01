@@ -203,9 +203,21 @@ public class Plugin : BaseUnityPlugin
 
 	private const int VK_SHIFT = 16;
 
+	private const int VK_LSHIFT = 160;
+
+	private const int VK_RSHIFT = 161;
+
 	private const int VK_CONTROL = 17;
 
+	private const int VK_LCONTROL = 162;
+
+	private const int VK_RCONTROL = 163;
+
 	private const int VK_MENU = 18;
+
+	private const int VK_LMENU = 164;
+
+	private const int VK_RMENU = 165;
 
 	private const int VK_LWIN = 91;
 
@@ -5750,21 +5762,17 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool IsModifierKeyDown()
 	{
-		return IsKeyDown(VK_SHIFT) || IsKeyDown(VK_CONTROL) || IsKeyDown(VK_MENU) || IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN);
+		return IsKeyDown(VK_SHIFT) || IsKeyDown(VK_LSHIFT) || IsKeyDown(VK_RSHIFT) || IsKeyDown(VK_CONTROL) || IsKeyDown(VK_LCONTROL) || IsKeyDown(VK_RCONTROL) || IsKeyDown(VK_MENU) || IsKeyDown(VK_LMENU) || IsKeyDown(VK_RMENU) || IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN);
 	}
 
 	private static bool IsModifierKey(int vkCode)
 	{
-		return vkCode == VK_SHIFT || vkCode == VK_CONTROL || vkCode == VK_MENU || vkCode == VK_LWIN || vkCode == VK_RWIN;
+		return vkCode == VK_SHIFT || vkCode == VK_LSHIFT || vkCode == VK_RSHIFT || vkCode == VK_CONTROL || vkCode == VK_LCONTROL || vkCode == VK_RCONTROL || vkCode == VK_MENU || vkCode == VK_LMENU || vkCode == VK_RMENU || vkCode == VK_LWIN || vkCode == VK_RWIN;
 	}
 
 	private static bool ShouldHandleKeyEvenWithModifier(int vkCode)
 	{
-		if (vkCode == VK_TAB)
-		{
-			return false;
-		}
-		return vkCode == VK_RETURN || vkCode == VK_ESCAPE || vkCode == VK_BACK || vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT || vkCode == VK_SPACE || IsDigitShortcut(vkCode);
+		return false;
 	}
 
 	private static void RecordSteamOverlayShortcut(int vkCode, IntPtr wParam, int flags)
@@ -5876,6 +5884,10 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool HandleDigitShortcut(int vkCode)
 	{
+		if (IsModifierKeyDown())
+		{
+			return false;
+		}
 		int num = DigitShortcutIndex(vkCode);
 		if (num < 0)
 		{
