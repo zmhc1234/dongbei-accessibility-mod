@@ -6431,40 +6431,24 @@ public class Plugin : BaseUnityPlugin
 		{
 			return false;
 		}
-		if (_inNodeMode && _storylineNodes != null && num < _storylineNodes.Length)
+		if (!_inOptionsMode || _options == null || num >= _options.Length)
 		{
-			_currentNodeIndex = num;
-			JumpToSelectedNode();
-			_suppressCurrentKey = true;
-			return true;
+			return false;
 		}
-		if (_inSettingsMode && _settings != null && num < _settings.Length)
+		OptionItem optionItem = _options[num];
+		if (!IsGameControllerStoryOption(optionItem))
 		{
-			_currentSettingIndex = num;
-			PlayGameSound("Highlight");
-			SpeakCurrentSetting();
-			_suppressCurrentKey = true;
-			return true;
+			return false;
 		}
-		if (_inOptionsMode && _options != null && num < _options.Length)
+		_currentOptionIndex = num;
+		ManualLogSource log = Log;
+		if (log != null)
 		{
-			_currentOptionIndex = num;
-			ManualLogSource log = Log;
-			if (log != null)
-			{
-				log.LogInfo((object)$"[快捷键] 数字 {num + 1} 选择选项");
-			}
-			HandleEnter();
-			_suppressCurrentKey = true;
-			return true;
+			log.LogInfo((object)$"[快捷键] 数字 {num + 1} 选择剧情选项");
 		}
-		if (_inOptionsMode || _inSettingsMode || _inNodeMode)
-		{
-			_suppressCurrentKey = true;
-			TolkHelper.Speak($"没有第 {num + 1} 项", interrupt: true);
-			return true;
-		}
-		return false;
+		HandleEnter();
+		_suppressCurrentKey = true;
+		return true;
 	}
 
 	private static void HandleEnter()
@@ -6592,12 +6576,17 @@ public class Plugin : BaseUnityPlugin
 		}
 		foreach (OptionItem optionItem in _options)
 		{
-			if (optionItem != null && optionItem.ClickableComponent != null && optionItem.ClickableComponent.GetType() == _gameControllerType)
+			if (IsGameControllerStoryOption(optionItem))
 			{
 				return true;
 			}
 		}
 		return false;
+	}
+
+	private static bool IsGameControllerStoryOption(OptionItem optionItem)
+	{
+		return optionItem != null && optionItem.Index >= 0 && optionItem.ClickableComponent != null && _gameControllerType != null && optionItem.ClickableComponent.GetType() == _gameControllerType;
 	}
 
 	private static void ClearCurrentOptionsAfterGameSelection()

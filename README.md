@@ -45,7 +45,7 @@ decompiled/plugin/bin/Release/netstandard2.1/DongbeiAccessibility.dll
 - F11 可切换自动过 QTE。
 - 快捷键只在游戏窗口前台时生效；其他窗口或 Steam 悬浮窗在前台时会立即放行，避免影响系统输入。
 - 游戏窗口前台时也会放行带 Ctrl、Alt、Shift、Win 的组合键，避免影响屏幕阅读器和系统快捷键。
-- 数字键快捷选择只响应单独按下的 1 到 9。
+- 数字键快捷选择只响应剧情中的真实选项；主菜单、故事线、设置、档案等页面不响应数字键。
 
 ## 当前常用按键
 
@@ -53,7 +53,7 @@ decompiled/plugin/bin/Release/netstandard2.1/DongbeiAccessibility.dll
 - 左右光标：调整设置，或在故事线章节页切换章节。
 - 回车：确认当前项目。
 - Esc：返回或关闭当前页面。
-- 数字键 1 到 9：直接选择列表里的对应项目，带 Ctrl、Alt、Shift、Win 时不会触发插件选择。
+- 数字键 1 到 9：仅在剧情出现选项时直接选择对应剧情选项；主菜单、故事线、设置、档案等页面不触发插件选择。
 - D：开关字幕朗读。
 - F3：故事线内跳到当前进度节点。
 - F5：重复朗读上一条内容。
