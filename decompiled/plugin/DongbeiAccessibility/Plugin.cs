@@ -184,6 +184,21 @@ public class Plugin : BaseUnityPlugin
 
 	private static uint _gameProcessId = 0u;
 
+	private static readonly int[] POLLED_KEYS = new int[22]
+	{
+		VK_F3, VK_F5, VK_F6, VK_F11, VK_D, VK_RETURN, VK_ESCAPE, VK_BACK, VK_UP, VK_DOWN,
+		VK_LEFT, VK_RIGHT, VK_SPACE, 49, 50, 51, 52, 53, 54, 55,
+		56, 57
+	};
+
+	private static readonly Dictionary<int, bool> _keyWasDown = new Dictionary<int, bool>();
+
+	private static readonly Dictionary<int, DateTime> _nextRepeatTimeUtc = new Dictionary<int, DateTime>();
+
+	private const int KEY_REPEAT_INITIAL_DELAY_MS = 350;
+
+	private const int KEY_REPEAT_INTERVAL_MS = 120;
+
 	private const int VK_F5 = 116;
 
 	private const int VK_F6 = 117;
@@ -197,6 +212,8 @@ public class Plugin : BaseUnityPlugin
 	private const int VK_F11 = 122;
 
 	private const int VK_F12 = 123;
+
+	private const int VK_F3 = 114;
 
 	private const int VK_D = 68;
 
@@ -257,6 +274,8 @@ public class Plugin : BaseUnityPlugin
 	private static IntPtr _timerId = IntPtr.Zero;
 
 	private const uint AUTO_DETECT_INTERVAL = 500u;
+
+	private const uint INPUT_POLL_INTERVAL = 60u;
 
 	private static readonly string[] CODE_EXPLORE_KEYWORDS = new string[27]
 	{
@@ -363,7 +382,7 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			InstallKeyboardHook();
+			Log.LogWarning((object)"系统键盘钩子已禁用：保留朗读和自动检测，避免影响 Steam 悬浮窗和系统输入");
 		}
 		catch (Exception ex3)
 		{
@@ -493,48 +512,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				log8.LogInfo((object)"[修复] 检测到游戏正在退出，执行正常清理...");
 			}
-			try
-			{
-				if (_timerId != IntPtr.Zero)
-				{
-					KillTimer(IntPtr.Zero, _timerId);
-					_timerId = IntPtr.Zero;
-					ManualLogSource log9 = Log;
-					if (log9 != null)
-					{
-						log9.LogInfo((object)"定时器已停止");
-					}
-				}
-			}
-			catch (Exception ex2)
-			{
-				ManualLogSource log10 = Log;
-				if (log10 != null)
-				{
-					log10.LogError((object)("停止定时器失败: " + ex2.Message));
-				}
-			}
-			try
-			{
-				if (_hookId != IntPtr.Zero)
-				{
-					UnhookWindowsHookEx(_hookId);
-					_hookId = IntPtr.Zero;
-					ManualLogSource log11 = Log;
-					if (log11 != null)
-					{
-						log11.LogInfo((object)"键盘钩子已卸载");
-					}
-				}
-			}
-			catch (Exception ex3)
-			{
-				ManualLogSource log12 = Log;
-				if (log12 != null)
-				{
-					log12.LogError((object)("卸载键盘钩子失败: " + ex3.Message));
-				}
-			}
+			StopNativeInputHandlers();
 			try
 			{
 				if (_harmony != null)
@@ -590,18 +568,65 @@ public class Plugin : BaseUnityPlugin
 			{
 				log19.LogInfo((object)"[修复] 键盘钩子、定时器、Harmony补丁将继续工作");
 			}
+			return;
 		}
 		Instance = null;
 		_pluginInitialized = false;
+	}
+
+	private static void StopNativeInputHandlers()
+	{
+		try
+		{
+			if (_timerId != IntPtr.Zero)
+			{
+				KillTimer(IntPtr.Zero, _timerId);
+				_timerId = IntPtr.Zero;
+				ManualLogSource log = Log;
+				if (log != null)
+				{
+					log.LogInfo((object)"定时器已停止");
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			ManualLogSource log2 = Log;
+			if (log2 != null)
+			{
+				log2.LogError((object)("停止定时器失败: " + ex.Message));
+			}
+		}
+		try
+		{
+			if (_hookId != IntPtr.Zero)
+			{
+				UnhookWindowsHookEx(_hookId);
+				_hookId = IntPtr.Zero;
+				ManualLogSource log3 = Log;
+				if (log3 != null)
+				{
+					log3.LogInfo((object)"键盘钩子已卸载");
+				}
+			}
+		}
+		catch (Exception ex2)
+		{
+			ManualLogSource log4 = Log;
+			if (log4 != null)
+			{
+				log4.LogError((object)("卸载键盘钩子失败: " + ex2.Message));
+			}
+		}
 	}
 
 	private static void StartAutoDetectTimer()
 	{
 		if (!(_timerId != IntPtr.Zero))
 		{
-			Log.LogInfo((object)$"启动自动检测定时器，间隔 {500u} 毫秒");
+			Log.LogInfo((object)$"启动自动检测定时器，间隔 {INPUT_POLL_INTERVAL} 毫秒");
 			TimerProc lpTimerFunc = AutoDetectTimerProc;
-			_timerId = SetTimer(IntPtr.Zero, IntPtr.Zero, 500u, lpTimerFunc);
+			_timerId = SetTimer(IntPtr.Zero, IntPtr.Zero, INPUT_POLL_INTERVAL, lpTimerFunc);
 			if (_timerId != IntPtr.Zero)
 			{
 				Log.LogInfo((object)"自动检测定时器启动成功");
@@ -621,11 +646,19 @@ public class Plugin : BaseUnityPlugin
 			{
 				log.LogDebug((object)"[诊断] 定时器触发");
 			}
-			if (IsGameWindowActive() && _needDetect)
+			if (IsGameWindowActive())
 			{
-				CheckNarrationSpeak();
-				_needDetect = false;
-				DetectUIState();
+				PollKeyboardInput();
+				if (_needDetect)
+				{
+					CheckNarrationSpeak();
+					_needDetect = false;
+					DetectUIState();
+				}
+			}
+			else
+			{
+				ResetPolledKeyStates();
 			}
 		}
 		catch (Exception ex)
@@ -641,6 +674,118 @@ public class Plugin : BaseUnityPlugin
 	public static void MarkNeedDetect()
 	{
 		_needDetect = true;
+	}
+
+	private static void PollKeyboardInput()
+	{
+		try
+		{
+			if (IsModifierKeyDown())
+			{
+				return;
+			}
+			for (int i = 0; i < POLLED_KEYS.Length; i++)
+			{
+				int num = POLLED_KEYS[i];
+				bool flag = IsKeyDown(num);
+				bool flag2 = _keyWasDown.ContainsKey(num) && _keyWasDown[num];
+				_keyWasDown[num] = flag;
+				if (!flag)
+				{
+					_nextRepeatTimeUtc.Remove(num);
+					continue;
+				}
+				DateTime utcNow = DateTime.UtcNow;
+				bool flag3 = !flag2;
+				if (!flag3 && IsRepeatablePolledKey(num))
+				{
+					DateTime value;
+					if (!_nextRepeatTimeUtc.TryGetValue(num, out value))
+					{
+						value = utcNow.AddMilliseconds(KEY_REPEAT_INITIAL_DELAY_MS);
+						_nextRepeatTimeUtc[num] = value;
+					}
+					if (utcNow >= value)
+					{
+						flag3 = true;
+						_nextRepeatTimeUtc[num] = utcNow.AddMilliseconds(KEY_REPEAT_INTERVAL_MS);
+					}
+				}
+				if (!flag3)
+				{
+					continue;
+				}
+				if (!ShouldPollHandleKey(num))
+				{
+					continue;
+				}
+				if (!flag2 && IsRepeatablePolledKey(num))
+				{
+					_nextRepeatTimeUtc[num] = utcNow.AddMilliseconds(KEY_REPEAT_INITIAL_DELAY_MS);
+				}
+				_suppressCurrentKey = false;
+				HandleKey(num);
+				_suppressCurrentKey = false;
+			}
+		}
+		catch (Exception ex)
+		{
+			ManualLogSource log = Log;
+			if (log != null)
+			{
+				log.LogDebug((object)("轮询键盘输入失败: " + ex.Message));
+			}
+		}
+	}
+
+	private static void ResetPolledKeyStates()
+	{
+		if (_keyWasDown.Count > 0)
+		{
+			_keyWasDown.Clear();
+		}
+		if (_nextRepeatTimeUtc.Count > 0)
+		{
+			_nextRepeatTimeUtc.Clear();
+		}
+	}
+
+	private static bool IsRepeatablePolledKey(int vkCode)
+	{
+		return vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT;
+	}
+
+	private static bool ShouldPollHandleKey(int vkCode)
+	{
+		if (vkCode == VK_F5 || vkCode == VK_F6 || vkCode == VK_F11 || vkCode == VK_D)
+		{
+			return true;
+		}
+		if (vkCode == VK_SPACE)
+		{
+			return _currentUIState == UIState.QTE;
+		}
+		if (IsDigitShortcut(vkCode))
+		{
+			return _inOptionsMode && _options.Length > 0 && AreCurrentOptionsFromGameController();
+		}
+		if (vkCode == VK_RETURN)
+		{
+			return (_inOptionsMode && _options.Length > 0) || (_inSettingsMode && _settings.Length > 0) || (_inNodeMode && _storylineNodes.Length > 0) || (_inArchiveMode && _archiveItems.Length > 0);
+		}
+		if (vkCode == VK_ESCAPE || vkCode == VK_BACK)
+		{
+			return _inSettingsMode || _inNodeMode || _currentUIState == UIState.Storyline || _inArchiveMode || _currentUIState == UIState.Archive;
+		}
+		if (vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT)
+		{
+			return (_inOptionsMode && _options.Length > 1) || (_inSettingsMode && _settings.Length > 0) || (_inNodeMode && _storylineNodes.Length > 1) || _inArchiveMode || _currentUIState == UIState.Archive;
+		}
+		if (vkCode == VK_F3)
+		{
+			return _currentUIState == UIState.Storyline;
+		}
+		return false;
 	}
 
 	private static void DetectUIState()
@@ -1545,6 +1690,12 @@ public class Plugin : BaseUnityPlugin
 					list.Add(optionItem);
 				}
 			}
+			OptionItem[] confirmationOptions = GetConfirmationDialogOptions(list);
+			if (confirmationOptions.Length >= 2)
+			{
+				Log.LogInfo((object)$"[选项过滤] 检测到确认弹窗，仅保留 {confirmationOptions.Length} 个弹窗按钮");
+				return confirmationOptions;
+			}
 			if (list.Count >= 2 && list.Count <= 12)
 			{
 				return list.ToArray();
@@ -1647,6 +1798,62 @@ public class Plugin : BaseUnityPlugin
 			Log.LogError((object)("获取可点击选项失败: " + ex.Message));
 			return new OptionItem[0];
 		}
+	}
+
+	private static OptionItem[] GetConfirmationDialogOptions(IEnumerable<OptionItem> candidates)
+	{
+		if (candidates == null)
+		{
+			return new OptionItem[0];
+		}
+		string[] confirmTexts = new string[5] { "确定", "确认", "是", "退出", "离开" };
+		string[] cancelTexts = new string[5] { "取消", "否", "返回", "关闭", "不" };
+		List<OptionItem> confirms = new List<OptionItem>();
+		List<OptionItem> cancels = new List<OptionItem>();
+		foreach (OptionItem candidate in candidates)
+		{
+			string text = candidate?.Text?.Trim();
+			if (string.IsNullOrEmpty(text) || text.Length > 8)
+			{
+				continue;
+			}
+			if (MatchesAnyDialogButtonText(text, confirmTexts))
+			{
+				confirms.Add(candidate);
+			}
+			else if (MatchesAnyDialogButtonText(text, cancelTexts))
+			{
+				cancels.Add(candidate);
+			}
+		}
+		if (confirms.Count == 0 || cancels.Count == 0)
+		{
+			return new OptionItem[0];
+		}
+		List<OptionItem> result = new List<OptionItem>();
+		result.AddRange(confirms);
+		result.AddRange(cancels);
+		return SortOptions(result.ToArray());
+	}
+
+	private static bool MatchesAnyDialogButtonText(string text, string[] values)
+	{
+		if (string.IsNullOrWhiteSpace(text) || values == null)
+		{
+			return false;
+		}
+		foreach (string value in values)
+		{
+			if (text.Equals(value, StringComparison.OrdinalIgnoreCase))
+			{
+				return true;
+			}
+			if (text.Length <= 4 && text.Contains(value))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static OptionItem[] GetSingleStartOptions(OptionItem[] visibleTexts)
@@ -5969,6 +6176,10 @@ public class Plugin : BaseUnityPlugin
 	{
 		try
 		{
+			if (!_pluginInitialized || _hookId == IntPtr.Zero)
+			{
+				return CallNextHookEx(_hookId, nCode, wParam, lParam);
+			}
 			if (nCode >= 0 && (wParam == (IntPtr)256 || wParam == (IntPtr)260))
 			{
 				int num = Marshal.ReadInt32(lParam);
@@ -6236,6 +6447,11 @@ public class Plugin : BaseUnityPlugin
 				}
 				else if (_inOptionsMode && _options.Length != 0)
 				{
+					if (_options.Length < 2)
+					{
+						LogInputState("Up released for single option");
+						break;
+					}
 					_currentOptionIndex--;
 					if (_currentOptionIndex < 0)
 					{
@@ -6279,6 +6495,11 @@ public class Plugin : BaseUnityPlugin
 				}
 				else if (_inOptionsMode && _options.Length != 0)
 				{
+					if (_options.Length < 2)
+					{
+						LogInputState("Down released for single option");
+						break;
+					}
 					_currentOptionIndex++;
 					if (_currentOptionIndex >= _options.Length)
 					{
@@ -6309,6 +6530,11 @@ public class Plugin : BaseUnityPlugin
 				}
 				else if (_inOptionsMode && _options.Length != 0)
 				{
+					if (_options.Length < 2)
+					{
+						LogInputState("Left released for single option");
+						break;
+					}
 					_currentOptionIndex--;
 					if (_currentOptionIndex < 0)
 					{
@@ -6339,6 +6565,11 @@ public class Plugin : BaseUnityPlugin
 				}
 				else if (_inOptionsMode && _options.Length != 0)
 				{
+					if (_options.Length < 2)
+					{
+						LogInputState("Right released for single option");
+						break;
+					}
 					_currentOptionIndex++;
 					if (_currentOptionIndex >= _options.Length)
 					{
@@ -6472,6 +6703,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				return;
 			}
+			bool flag3 = IsCurrentOptionsConfirmationDialog() && IsConfirmationDialogOption(optionItem);
 			bool flag = !string.IsNullOrEmpty(optionItem.Text) && (optionItem.Text.Contains("返回") || optionItem.Text.Contains("关闭") || optionItem.Text.Equals("Back", StringComparison.OrdinalIgnoreCase));
 			bool flag2 = optionItem.ChapterInfo != null;
 			PlayGameSound(flag ? "Back" : "Click");
@@ -6534,6 +6766,10 @@ public class Plugin : BaseUnityPlugin
 					{
 						EnterNodeModeAfterChapterClick(optionItem.ChapterInfo?.ChapterNumber ?? 0);
 					}
+					if (flag3)
+					{
+						ClearCurrentOptionsAfterTransientClick("confirmation dialog click");
+					}
 					return;
 				}
 				ManualLogSource log7 = Log;
@@ -6553,6 +6789,10 @@ public class Plugin : BaseUnityPlugin
 			if (flag2)
 			{
 				EnterNodeModeAfterChapterClick(optionItem.ChapterInfo?.ChapterNumber ?? 0);
+			}
+			if (flag3)
+			{
+				ClearCurrentOptionsAfterTransientClick("confirmation dialog mouse click");
 			}
 		}
 		else
@@ -6587,6 +6827,41 @@ public class Plugin : BaseUnityPlugin
 	private static bool IsGameControllerStoryOption(OptionItem optionItem)
 	{
 		return optionItem != null && optionItem.Index >= 0 && optionItem.ClickableComponent != null && _gameControllerType != null && optionItem.ClickableComponent.GetType() == _gameControllerType;
+	}
+
+	private static bool IsConfirmationDialogOption(OptionItem optionItem)
+	{
+		string text = optionItem?.Text?.Trim();
+		if (string.IsNullOrEmpty(text) || text.Length > 8)
+		{
+			return false;
+		}
+		string[] array = new string[10] { "确定", "确认", "是", "退出", "离开", "取消", "否", "返回", "关闭", "不" };
+		foreach (string value in array)
+		{
+			if (text.Equals(value, StringComparison.OrdinalIgnoreCase) || (text.Length <= 4 && text.Contains(value)))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static bool IsCurrentOptionsConfirmationDialog()
+	{
+		return _options != null && GetConfirmationDialogOptions(_options).Length >= 2;
+	}
+
+	private static void ClearCurrentOptionsAfterTransientClick(string reason)
+	{
+		_inOptionsMode = false;
+		_options = new OptionItem[0];
+		_currentOptionIndex = 0;
+		_optionsMissCount = 0;
+		_currentUIState = UIState.Unknown;
+		_lastDetectedSignature = "";
+		MarkNeedDetect();
+		LogInputState("Clear options after " + reason);
 	}
 
 	private static void ClearCurrentOptionsAfterGameSelection()
