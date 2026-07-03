@@ -94,6 +94,14 @@ public class Plugin : BaseUnityPlugin
 
 	private static DateTime _lastQTESpeakUtc = DateTime.MinValue;
 
+	private static DateTime _lastQTEStartedUtc = DateTime.MinValue;
+
+	private static object _lastQTEController;
+
+	private static DateTime _suppressSpaceUntilUtc = DateTime.MinValue;
+
+	private static DateTime _lastQTESkipAttemptUtc = DateTime.MinValue;
+
 	private static Type _triggerAreaType;
 
 	private static bool _triggerAreaTypesResolved = false;
@@ -763,7 +771,7 @@ public class Plugin : BaseUnityPlugin
 		}
 		if (vkCode == VK_SPACE)
 		{
-			return _currentUIState == UIState.QTE;
+			return IsQTEInputActive();
 		}
 		if (IsDigitShortcut(vkCode))
 		{
@@ -1034,6 +1042,35 @@ public class Plugin : BaseUnityPlugin
 			Log.LogDebug((object)("检测 QTE 激活状态失败: " + ex.Message));
 			return false;
 		}
+	}
+
+	private static bool IsQTEInputActive()
+	{
+		if (_currentUIState == UIState.QTE)
+		{
+			return true;
+		}
+		if ((DateTime.UtcNow - _lastQTEStartedUtc).TotalSeconds < 2.0)
+		{
+			return true;
+		}
+		return IsQTEActive();
+	}
+
+	private static bool ShouldSuppressSpaceForQTE()
+	{
+		return DateTime.UtcNow < _suppressSpaceUntilUtc || IsQTEInputActive();
+	}
+
+	private static void TrySkipQTEFromSpace()
+	{
+		DateTime utcNow = DateTime.UtcNow;
+		if ((utcNow - _lastQTESkipAttemptUtc).TotalMilliseconds < 300.0)
+		{
+			return;
+		}
+		_lastQTESkipAttemptUtc = utcNow;
+		SkipCurrentQTE();
 	}
 
 	private static void ResolveArchiveTypes()
@@ -5779,6 +5816,10 @@ public class Plugin : BaseUnityPlugin
 	{
 		try
 		{
+			_lastQTEStartedUtc = DateTime.UtcNow;
+			_lastQTEController = __instance;
+			_currentUIState = UIState.QTE;
+			_lastDetectedSignature = "qte";
 			SpeakQTEPrompt(__instance, allowRecentRepeat: false);
 			if (_autoQTEEnabled)
 			{
@@ -5806,7 +5847,10 @@ public class Plugin : BaseUnityPlugin
 	{
 		try
 		{
-			bool flag = false;
+			if (qteController == null)
+			{
+				return false;
+			}
 			Log.LogInfo((object)"【跳过 QTE】方式 1: 调用 OnQTEFinished 成功回调");
 			FieldInfo field = _qteControllerType.GetField("OnQTEFinished", BindingFlags.Instance | BindingFlags.Public);
 			if (field != null)
@@ -5819,7 +5863,11 @@ public class Plugin : BaseUnityPlugin
 					{
 						method.Invoke(value, new object[1] { true });
 						Log.LogInfo((object)"【跳过 QTE】方式 1 成功: 已触发成功回调");
-						flag = true;
+						_lastQTEStartedUtc = DateTime.MinValue;
+						_lastQTEController = null;
+						_suppressSpaceUntilUtc = DateTime.UtcNow.AddMilliseconds(800.0);
+						_needDetect = true;
+						return true;
 					}
 				}
 				else
@@ -5831,60 +5879,8 @@ public class Plugin : BaseUnityPlugin
 			{
 				Log.LogWarning((object)"【跳过 QTE】方式 1: 找不到 OnQTEFinished 字段");
 			}
-			Log.LogInfo((object)"【跳过 QTE】方式 2: 禁用 QTEController 组件");
-			try
-			{
-				PropertyInfo property = _qteControllerType.GetProperty("enabled");
-				if (property != null)
-				{
-					property.SetValue(qteController, false);
-					Log.LogInfo((object)"【跳过 QTE】方式 2 成功: 已禁用组件");
-				}
-			}
-			catch (Exception ex)
-			{
-				Log.LogWarning((object)("【跳过 QTE】方式 2 失败: " + ex.Message));
-			}
-			Log.LogInfo((object)"【跳过 QTE】方式 3: 禁用游戏对象");
-			try
-			{
-				PropertyInfo property2 = _qteControllerType.GetProperty("gameObject");
-				if (property2 != null)
-				{
-					object value2 = property2.GetValue(qteController);
-					if (value2 != null)
-					{
-						MethodInfo method2 = value2.GetType().GetMethod("SetActive");
-						if (method2 != null)
-						{
-							method2.Invoke(value2, new object[1] { false });
-							Log.LogInfo((object)"【跳过 QTE】方式 3 成功: 已禁用游戏对象");
-						}
-					}
-				}
-			}
-			catch (Exception ex2)
-			{
-				Log.LogWarning((object)("【跳过 QTE】方式 3 失败: " + ex2.Message));
-			}
-			if (!flag)
-			{
-				Log.LogInfo((object)"【跳过 QTE】方式 4: 调用 StopQTE（兜底方案）");
-				try
-				{
-					MethodInfo method3 = _qteControllerType.GetMethod("StopQTE", BindingFlags.Instance | BindingFlags.Public);
-					if (method3 != null)
-					{
-						method3.Invoke(qteController, null);
-						Log.LogInfo((object)"【跳过 QTE】方式 4: 已调用 StopQTE");
-					}
-				}
-				catch (Exception ex3)
-				{
-					Log.LogWarning((object)("【跳过 QTE】方式 4 失败: " + ex3.Message));
-				}
-			}
-			return flag;
+			Log.LogWarning((object)"【跳过 QTE】未找到安全成功回调，取消兜底禁用/StopQTE，避免误暂停或误判失败");
+			return false;
 		}
 		catch (Exception ex4)
 		{
@@ -5904,6 +5900,12 @@ public class Plugin : BaseUnityPlugin
 			{
 				Log.LogWarning((object)"QTE 类型未找到，无法执行精准跳过");
 				TolkHelper.Speak("QTE 精准跳过不可用", interrupt: true);
+				return;
+			}
+			if (_lastQTEController != null && TrySkipQTE(_lastQTEController))
+			{
+				Log.LogInfo((object)"【一键过 QTE】已跳过最近启动的 QTE");
+				TolkHelper.Speak("QTE 已跳过", interrupt: true);
 				return;
 			}
 			Array array = FindObjectsOfType(_qteControllerType);
@@ -6211,6 +6213,16 @@ public class Plugin : BaseUnityPlugin
 					}
 					return CallNextHookEx(_hookId, nCode, wParam, lParam);
 				}
+				if (num == VK_SPACE && ShouldSuppressSpaceForQTE())
+				{
+					ManualLogSource log7 = Log;
+					if (log7 != null)
+					{
+						log7.LogInfo((object)"[键盘钩子] QTE 期间拦截空格，避免传给游戏暂停");
+					}
+					TrySkipQTEFromSpace();
+					return new IntPtr(1);
+				}
 				_suppressCurrentKey = false;
 				HandleKey(num);
 				if (_suppressCurrentKey)
@@ -6362,7 +6374,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			case 32:
 			{
-				if (_currentUIState == UIState.QTE)
+				if (IsQTEInputActive())
 				{
 					ManualLogSource log15 = Log;
 					if (log15 != null)
