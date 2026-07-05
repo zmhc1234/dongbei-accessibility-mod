@@ -7074,20 +7074,27 @@ public class Plugin : BaseUnityPlugin
 			object fieldValue2 = GetFieldValue(fieldValue, "nextNodeAfterAllOptions");
 			object fieldValue3 = GetFieldValue(activeObject, "parentRevisitableNode");
 			Log.LogInfo((object)("[循环选项] 当前节点=" + GetGameNodeId(fieldValue) + ", nextNodeAfterAllOptions=" + GetGameNodeId(fieldValue2) + ", parentRevisitableNode=" + GetGameNodeId(fieldValue3)));
-			if (TryActivateKnownBrokenRevisitableContinue(activeObject, fieldValue))
-			{
-				return true;
-			}
-			if (fieldValue2 == null && fieldValue != null && fieldValue3 != null)
+			if (fieldValue != null && fieldValue2 == null)
 			{
 				object obj = FindRevisitableParentNodeForChild(fieldValue);
 				object fieldValue4 = GetFieldValue(obj, "nextNodeAfterAllOptions");
 				Log.LogInfo((object)("[循环选项] 反查父节点=" + GetGameNodeId(obj) + ", 父节点继续目标=" + GetGameNodeId(fieldValue4)));
 				if (obj != null && fieldValue4 != null)
 				{
-					fieldValue3 = obj;
-					fieldValue2 = fieldValue4;
+					MarkRevisitableOptionVisited(activeObject, obj, fieldValue);
+					SetFieldValue(activeObject, "parentRevisitableNode", obj);
+					MethodInfo method = _gameControllerType.GetMethod("PlayingEnded", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+					if (method != null)
+					{
+						method.Invoke(activeObject, null);
+						Log.LogInfo((object)("[循环选项] 已按父循环节点交给游戏处理继续: " + GetGameNodeId(obj)));
+						return true;
+					}
 				}
+			}
+			if (TryActivateKnownBrokenRevisitableContinue(activeObject, fieldValue))
+			{
+				return true;
 			}
 			if (fieldValue != null && fieldValue2 != null)
 			{
@@ -7110,6 +7117,140 @@ public class Plugin : BaseUnityPlugin
 			Log.LogWarning((object)("[循环选项] 直接继续失败: " + ex.GetType().Name + " - " + ex.Message));
 			return false;
 		}
+	}
+
+	private static bool MarkRevisitableOptionVisited(object gameController, object parentNode, object childNode)
+	{
+		if (gameController == null || parentNode == null || childNode == null)
+		{
+			return false;
+		}
+		string gameNodeId = GetGameNodeId(parentNode);
+		if (string.IsNullOrWhiteSpace(gameNodeId) || gameNodeId == "<null>")
+		{
+			return false;
+		}
+		try
+		{
+			List<object> list = EnumerateObjects(GetFieldValue(parentNode, "options")).ToList();
+			int num = FindRevisitableOptionIndex(list, childNode);
+			if (num < 0)
+			{
+				Log.LogDebug((object)("[循环选项] 未找到子节点对应的选项序号: 父节点=" + gameNodeId + ", 子节点=" + GetGameNodeId(childNode)));
+				return false;
+			}
+			object fieldValue = GetFieldValue(gameController, "revisitableOptionStates");
+			if (fieldValue == null)
+			{
+				InvokeNoArg(gameController, "InitializeRevisitableOptionStates");
+				fieldValue = GetFieldValue(gameController, "revisitableOptionStates");
+			}
+			if (fieldValue == null)
+			{
+				return false;
+			}
+			bool[] array = GetRevisitableVisitedArray(fieldValue, gameNodeId);
+			if (array == null || array.Length < list.Count)
+			{
+				bool[] array2 = new bool[list.Count];
+				if (array != null)
+				{
+					Array.Copy(array, array2, Math.Min(array.Length, array2.Length));
+				}
+				array = array2;
+			}
+			array[num] = true;
+			if (!SetRevisitableVisitedArray(fieldValue, gameNodeId, array))
+			{
+				return false;
+			}
+			Log.LogInfo((object)("[循环选项] 已标记循环选项为访问过: 父节点=" + gameNodeId + ", 选项=" + (num + 1) + "/" + list.Count));
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[循环选项] 标记选项访问状态失败: " + ex.Message));
+			return false;
+		}
+	}
+
+	private static int FindRevisitableOptionIndex(List<object> options, object childNode)
+	{
+		if (options == null || childNode == null)
+		{
+			return -1;
+		}
+		string gameNodeId = GetGameNodeId(childNode);
+		for (int i = 0; i < options.Count; i++)
+		{
+			object fieldValue = GetFieldValue(options[i], "node");
+			if (fieldValue != null && (object.ReferenceEquals(fieldValue, childNode) || (!string.IsNullOrWhiteSpace(gameNodeId) && gameNodeId != "<null>" && gameNodeId == GetGameNodeId(fieldValue))))
+			{
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	private static bool[] GetRevisitableVisitedArray(object states, string nodeId)
+	{
+		if (states == null || string.IsNullOrWhiteSpace(nodeId))
+		{
+			return null;
+		}
+		try
+		{
+			MethodInfo method = states.GetType().GetMethod("TryGetValue", new Type[2]
+			{
+				typeof(string),
+				typeof(bool[]).MakeByRefType()
+			});
+			if (method != null)
+			{
+				object[] array = new object[2] { nodeId, null };
+				if (method.Invoke(states, array) is bool flag && flag)
+				{
+					return array[1] as bool[];
+				}
+			}
+			PropertyInfo property = states.GetType().GetProperty("Item");
+			return property?.GetValue(states, new object[1] { nodeId }) as bool[];
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	private static bool SetRevisitableVisitedArray(object states, string nodeId, bool[] visited)
+	{
+		if (states == null || string.IsNullOrWhiteSpace(nodeId) || visited == null)
+		{
+			return false;
+		}
+		try
+		{
+			PropertyInfo property = states.GetType().GetProperty("Item");
+			if (property != null)
+			{
+				property.SetValue(states, visited, new object[1] { nodeId });
+				return true;
+			}
+			MethodInfo method = states.GetType().GetMethod("Add", new Type[2]
+			{
+				typeof(string),
+				typeof(bool[])
+			});
+			if (method != null)
+			{
+				method.Invoke(states, new object[2] { nodeId, visited });
+				return true;
+			}
+		}
+		catch
+		{
+		}
+		return false;
 	}
 
 	private static bool TryActivateKnownBrokenRevisitableContinue(object gameController, object currentNode)
