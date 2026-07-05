@@ -390,7 +390,8 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			Log.LogWarning((object)"系统键盘钩子已禁用：保留朗读和自动检测，避免影响 Steam 悬浮窗和系统输入");
+			InstallKeyboardHook();
+			Log.LogInfo((object)"系统键盘钩子仅用于 QTE 空格拦截，其他按键继续由轮询处理");
 		}
 		catch (Exception ex3)
 		{
@@ -1060,6 +1061,11 @@ public class Plugin : BaseUnityPlugin
 	private static bool ShouldSuppressSpaceForQTE()
 	{
 		return DateTime.UtcNow < _suppressSpaceUntilUtc || IsQTEInputActive();
+	}
+
+	private static bool ShouldTrySkipQTEFromSuppressedSpace()
+	{
+		return _lastQTEController != null || (DateTime.UtcNow - _lastQTEStartedUtc).TotalSeconds < 2.0 || IsQTEActive();
 	}
 
 	private static void TrySkipQTEFromSpace()
@@ -5818,6 +5824,7 @@ public class Plugin : BaseUnityPlugin
 		{
 			_lastQTEStartedUtc = DateTime.UtcNow;
 			_lastQTEController = __instance;
+			_suppressSpaceUntilUtc = DateTime.UtcNow.AddSeconds(3.0);
 			_currentUIState = UIState.QTE;
 			_lastDetectedSignature = "qte";
 			SpeakQTEPrompt(__instance, allowRecentRepeat: false);
@@ -5865,7 +5872,7 @@ public class Plugin : BaseUnityPlugin
 						Log.LogInfo((object)"【跳过 QTE】方式 1 成功: 已触发成功回调");
 						_lastQTEStartedUtc = DateTime.MinValue;
 						_lastQTEController = null;
-						_suppressSpaceUntilUtc = DateTime.UtcNow.AddMilliseconds(800.0);
+						_suppressSpaceUntilUtc = DateTime.UtcNow.AddMilliseconds(350.0);
 						_needDetect = true;
 						return true;
 					}
@@ -6220,20 +6227,13 @@ public class Plugin : BaseUnityPlugin
 					{
 						log7.LogInfo((object)"[键盘钩子] QTE 期间拦截空格，避免传给游戏暂停");
 					}
-					TrySkipQTEFromSpace();
-					return new IntPtr(1);
-				}
-				_suppressCurrentKey = false;
-				HandleKey(num);
-				if (_suppressCurrentKey)
-				{
-					ManualLogSource log3 = Log;
-					if (log3 != null)
+					if (ShouldTrySkipQTEFromSuppressedSpace())
 					{
-						log3.LogInfo((object)"[键盘钩子] 拦截按键，不传递给游戏");
+						TrySkipQTEFromSpace();
 					}
 					return new IntPtr(1);
 				}
+				return CallNextHookEx(_hookId, nCode, wParam, lParam);
 			}
 		}
 		catch (Exception ex)
