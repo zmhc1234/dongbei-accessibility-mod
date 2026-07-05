@@ -1128,19 +1128,19 @@ public class Plugin : BaseUnityPlugin
 		try
 		{
 			object activeArchiveContentController = GetActiveArchiveContentController();
-			if (activeArchiveContentController != null)
+			if (activeArchiveContentController != null && IsArchiveControllerPageVisible(activeArchiveContentController, "") && HasArchiveContentVisibleText(activeArchiveContentController))
 			{
 				string archiveContentTitle = GetArchiveContentTitle(activeArchiveContentController);
 				return "archive_content_" + archiveContentTitle;
 			}
 			object activeCharacterDetailController = GetActiveCharacterDetailController();
-			if (activeCharacterDetailController != null)
+			if (activeCharacterDetailController != null && IsArchiveControllerPageVisible(activeCharacterDetailController, "") && GetArchiveDetailItems(activeCharacterDetailController).Length > 0)
 			{
 				OptionItem[] archiveDetailItems = GetArchiveDetailItems(activeCharacterDetailController);
 				return "archive_detail_" + GetTextComponentText(GetFieldValue(activeCharacterDetailController, "characterNameText")) + "_" + archiveDetailItems.Length;
 			}
 			object activeArchiveHomeController = GetActiveArchiveHomeController();
-			if (activeArchiveHomeController != null)
+			if (activeArchiveHomeController != null && IsArchiveControllerPageVisible(activeArchiveHomeController, "archivePageToggle") && GetArchiveHomeItems(activeArchiveHomeController).Length > 0)
 			{
 				OptionItem[] archiveHomeItems = GetArchiveHomeItems(activeArchiveHomeController);
 				return "archive_home_" + archiveHomeItems.Length;
@@ -1247,7 +1247,7 @@ public class Plugin : BaseUnityPlugin
 			_currentSettingIndex = 0;
 			ClearNodeMode("Enter archive");
 			object activeArchiveContentController = GetActiveArchiveContentController();
-			if (activeArchiveContentController != null)
+			if (activeArchiveContentController != null && IsArchiveControllerPageVisible(activeArchiveContentController, "") && HasArchiveContentVisibleText(activeArchiveContentController))
 			{
 				_inArchiveMode = true;
 				_archiveModeName = "Content";
@@ -1257,18 +1257,24 @@ public class Plugin : BaseUnityPlugin
 				return;
 			}
 			object activeCharacterDetailController = GetActiveCharacterDetailController();
-			if (activeCharacterDetailController != null)
+			if (activeCharacterDetailController != null && IsArchiveControllerPageVisible(activeCharacterDetailController, ""))
 			{
 				OptionItem[] archiveDetailItems = GetArchiveDetailItems(activeCharacterDetailController);
-				SetArchiveItems("Detail", archiveDetailItems, "档案详情");
-				return;
+				if (archiveDetailItems.Length > 0)
+				{
+					SetArchiveItems("Detail", archiveDetailItems, "档案详情");
+					return;
+				}
 			}
 			object activeArchiveHomeController = GetActiveArchiveHomeController();
-			if (activeArchiveHomeController != null)
+			if (activeArchiveHomeController != null && IsArchiveControllerPageVisible(activeArchiveHomeController, "archivePageToggle"))
 			{
 				OptionItem[] archiveHomeItems = GetArchiveHomeItems(activeArchiveHomeController);
-				SetArchiveItems("Home", archiveHomeItems, "档案首页");
-				return;
+				if (archiveHomeItems.Length > 0)
+				{
+					SetArchiveItems("Home", archiveHomeItems, "档案首页");
+					return;
+				}
 			}
 			LeaveArchiveMode();
 		}
@@ -5206,9 +5212,35 @@ public class Plugin : BaseUnityPlugin
 	{
 		_restoreStorylineNodeModeOnOpen = false;
 		ClearNodeMode("Return to chapter selection from node mode");
+		ShowStorylineChapterSelectionNative();
+		_currentUIState = UIState.Storyline;
+		_lastDetectedSignature = GetStorylineSignature();
 		EnterStorylineMode();
 		TolkHelper.Speak("已返回章节选择", interrupt: true);
 		MarkNeedDetect();
+	}
+
+	private static void ShowStorylineChapterSelectionNative()
+	{
+		try
+		{
+			ResolveStorylineTypes();
+			object activeObject = GetActiveObject(_storylineUIManagerType);
+			if (InvokeNoArg(activeObject, "ShowChapterSelection"))
+			{
+				Log.LogInfo((object)"[故事线] 已调用 StorylineUIManager.ShowChapterSelection 返回章节列表");
+				return;
+			}
+			object activeObject2 = GetActiveObject(_chapterStorylineControllerType);
+			if (InvokeNoArg(activeObject2, "ShowChapterSelection"))
+			{
+				Log.LogInfo((object)"[故事线] 已调用 ChapterStorylineController.ShowChapterSelection 返回章节列表");
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[故事线] 调用原生章节列表失败: " + ex.Message));
+		}
 	}
 
 	private static void CloseStorylineFromChapterSelection()
@@ -6492,6 +6524,15 @@ public class Plugin : BaseUnityPlugin
 					}
 					return new IntPtr(1);
 				}
+				if (ShouldSuppressHandledKeyForGame(num))
+				{
+					ManualLogSource log8 = Log;
+					if (log8 != null)
+					{
+						log8.LogDebug((object)$"[键盘钩子] 拦截插件已接管按键 0x{num:X2}");
+					}
+					return new IntPtr(1);
+				}
 				return CallNextHookEx(_hookId, nCode, wParam, lParam);
 			}
 		}
@@ -6504,6 +6545,23 @@ public class Plugin : BaseUnityPlugin
 			}
 		}
 		return CallNextHookEx(_hookId, nCode, wParam, lParam);
+	}
+
+	private static bool ShouldSuppressHandledKeyForGame(int vkCode)
+	{
+		if (vkCode == VK_SPACE)
+		{
+			return false;
+		}
+		if (IsModifierKey(vkCode) || IsModifierKeyDown())
+		{
+			return false;
+		}
+		if (!ShouldPollHandleKey(vkCode))
+		{
+			return false;
+		}
+		return vkCode == VK_ESCAPE || vkCode == VK_BACK || vkCode == VK_RETURN || vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT || vkCode == VK_F3 || vkCode == VK_F5 || vkCode == VK_F6 || vkCode == VK_F11 || vkCode == VK_D || IsDigitShortcut(vkCode);
 	}
 
 	private static void HandleKey(int vkCode)
