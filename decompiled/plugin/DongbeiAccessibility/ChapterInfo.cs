@@ -6,6 +6,8 @@ public class ChapterInfo
 
 	public int ChapterNumber { get; set; }
 
+	public string DisplayNumber { get; set; }
+
 	public string Name { get; set; }
 
 	public string ProgressText { get; set; }

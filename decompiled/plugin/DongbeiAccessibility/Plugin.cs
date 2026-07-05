@@ -4227,17 +4227,28 @@ public class Plugin : BaseUnityPlugin
 			FieldInfo field2 = type.GetField("button", BindingFlags.Instance | BindingFlags.Public);
 			FieldInfo field3 = type.GetField("progressPercentageText", BindingFlags.Instance | BindingFlags.Public);
 			FieldInfo field4 = type.GetField("lockedOverlayImage", BindingFlags.Instance | BindingFlags.Public);
+			FieldInfo field5 = type.GetField("chapterNumberText", BindingFlags.Instance | BindingFlags.Public);
+			FieldInfo field6 = type.GetField("chapterNameText", BindingFlags.Instance | BindingFlags.Public);
 			for (int i = 0; i < array2.Length; i++)
 			{
 				object value = array2.GetValue(i);
 				ChapterInfo chapterInfo = new ChapterInfo();
 				chapterInfo.Index = i;
 				chapterInfo.ChapterNumber = i + 1;
+				chapterInfo.DisplayNumber = GetChapterDisplayNumber(value, field5, chapterInfo.ChapterNumber);
+				if (field6 != null)
+				{
+					chapterInfo.Name = NormalizeReadableText(GetTextComponentText(field6.GetValue(value)));
+				}
 				if (field != null)
 				{
-					chapterInfo.Name = (string)field.GetValue(value);
+					string text = field.GetValue(value) as string;
+					if (string.IsNullOrWhiteSpace(chapterInfo.Name) && !string.IsNullOrWhiteSpace(text))
+					{
+						chapterInfo.Name = text;
+					}
 				}
-				else
+				if (string.IsNullOrWhiteSpace(chapterInfo.Name))
 				{
 					try
 					{
@@ -4253,7 +4264,7 @@ public class Plugin : BaseUnityPlugin
 				}
 				if (string.IsNullOrEmpty(chapterInfo.Name))
 				{
-					chapterInfo.Name = $"第 {i + 1} 章";
+					chapterInfo.Name = GetFallbackChapterName(chapterInfo.ChapterNumber);
 				}
 				if (field2 != null)
 				{
@@ -4307,12 +4318,12 @@ public class Plugin : BaseUnityPlugin
 						if (obj4 != null)
 						{
 							Type type2 = obj4.GetType();
-							FieldInfo field5 = type2.GetField("Item1");
-							FieldInfo field6 = type2.GetField("Item2");
-							if (field5 != null && field6 != null)
+							FieldInfo field7 = type2.GetField("Item1");
+							FieldInfo field8 = type2.GetField("Item2");
+							if (field7 != null && field8 != null)
 							{
-								int num = (int)field5.GetValue(obj4);
-								int num2 = (int)field6.GetValue(obj4);
+								int num = (int)field7.GetValue(obj4);
+								int num2 = (int)field8.GetValue(obj4);
 								chapterInfo.ProgressReached = num;
 								chapterInfo.ProgressTotal = num2;
 								if (string.IsNullOrEmpty(chapterInfo.ProgressText) && num2 > 0)
@@ -4339,6 +4350,62 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
+	private static string GetChapterDisplayNumber(object chapterButton, FieldInfo chapterNumberTextField, int chapterNumber)
+	{
+		string text = "";
+		try
+		{
+			if (chapterButton != null && chapterNumberTextField != null)
+			{
+				text = NormalizeReadableText(GetTextComponentText(chapterNumberTextField.GetValue(chapterButton)));
+			}
+		}
+		catch
+		{
+		}
+		if (!string.IsNullOrWhiteSpace(text))
+		{
+			return text;
+		}
+		if (chapterNumber == 1)
+		{
+			return "序章";
+		}
+		if (chapterNumber == 6)
+		{
+			return "终章";
+		}
+		return $"第{chapterNumber - 1}章";
+	}
+
+	private static string GetFallbackChapterName(int chapterNumber)
+	{
+		if (chapterNumber <= 0)
+		{
+			return "";
+		}
+		return GetChapterDisplayNumber(null, null, chapterNumber);
+	}
+
+	private static string FormatStorylineChapterOptionText(ChapterInfo chapterInfo)
+	{
+		if (chapterInfo == null)
+		{
+			return "";
+		}
+		string text = NormalizeReadableText(chapterInfo.DisplayNumber);
+		string text2 = NormalizeReadableText(chapterInfo.Name);
+		if (string.IsNullOrWhiteSpace(text))
+		{
+			text = $"章节 {chapterInfo.ChapterNumber}";
+		}
+		if (string.IsNullOrWhiteSpace(text2) || string.Equals(text, text2, StringComparison.Ordinal))
+		{
+			return text;
+		}
+		return text + "，" + text2;
+	}
+
 	private static void EnterStorylineMode()
 	{
 		EnterStorylineMode(allowNodeRestore: false);
@@ -4363,7 +4430,7 @@ public class Plugin : BaseUnityPlugin
 			foreach (ChapterInfo chapterInfo in array2.OrderBy((ChapterInfo c) => c.ChapterNumber).ThenBy((ChapterInfo c) => c.Index))
 		{
 			OptionItem optionItem = new OptionItem();
-			string text = $"章节 {chapterInfo.ChapterNumber}，{chapterInfo.Name}";
+			string text = FormatStorylineChapterOptionText(chapterInfo);
 			if (chapterInfo.IsLocked)
 			{
 				text += "（已锁定）";
