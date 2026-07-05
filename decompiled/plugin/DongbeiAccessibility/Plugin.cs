@@ -76,6 +76,10 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool _inStorylineMode;
 
+	private static int _lastStorylineChapterNumber;
+
+	private static bool _restoreStorylineNodeModeOnOpen;
+
 	private static int _storylineMissCount = 0;
 
 	private const int STORYLINE_MISS_THRESHOLD = 3;
@@ -964,7 +968,7 @@ public class Plugin : BaseUnityPlugin
 			{
 			case UIState.Storyline:
 				Log.LogInfo((object)"进入故事线页面");
-				EnterStorylineMode();
+				EnterStorylineMode(allowNodeRestore: true);
 				break;
 			case UIState.Options:
 				Log.LogInfo((object)"进入选项界面");
@@ -4303,6 +4307,15 @@ public class Plugin : BaseUnityPlugin
 
 	private static void EnterStorylineMode()
 	{
+		EnterStorylineMode(allowNodeRestore: false);
+	}
+
+	private static void EnterStorylineMode(bool allowNodeRestore)
+	{
+		if (allowNodeRestore && TryRestoreStorylineNodeModeOnOpen())
+		{
+			return;
+		}
 		ChapterInfo[] storylineChapters = GetStorylineChapters();
 		if (storylineChapters.Length == 0)
 		{
@@ -4339,6 +4352,37 @@ public class Plugin : BaseUnityPlugin
 			log.LogInfo((object)"[故事线] 强制设置为横向排列");
 		}
 		TolkHelper.Speak($"故事线页面，共 {storylineChapters.Length} 个章节，已进入章节选择模式。按左右光标切换章节，按回车进入", interrupt: true);
+	}
+
+	private static bool TryRestoreStorylineNodeModeOnOpen()
+	{
+		if (!_restoreStorylineNodeModeOnOpen || _lastStorylineChapterNumber <= 0)
+		{
+			return false;
+		}
+		int lastStorylineChapterNumber = _lastStorylineChapterNumber;
+		_restoreStorylineNodeModeOnOpen = false;
+		try
+		{
+			if (!TryEnterStorylineChapterDirect(lastStorylineChapterNumber))
+			{
+				Log.LogInfo((object)$"[故事线] 无法恢复到上次章节 {lastStorylineChapterNumber}，回退到章节选择");
+				return false;
+			}
+			_inStorylineMode = true;
+			_inOptionsMode = false;
+			_options = new OptionItem[0];
+			_currentOptionIndex = 0;
+			_isHorizontalLayout = false;
+			EnterNodeModeAfterChapterClick(lastStorylineChapterNumber);
+			Log.LogInfo((object)$"[故事线] 从剧情打开故事线，恢复到上次章节节点列表: {lastStorylineChapterNumber}");
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("[故事线] 恢复上次章节节点列表失败，回退到章节选择: " + ex.Message));
+			return false;
+		}
 	}
 
 	private static void BackToPreviousNode()
@@ -5060,10 +5104,27 @@ public class Plugin : BaseUnityPlugin
 
 	private static void ReturnToChapterSelectionFromNodeMode()
 	{
+		_restoreStorylineNodeModeOnOpen = false;
 		ClearNodeMode("Return to chapter selection from node mode");
 		EnterStorylineMode();
 		TolkHelper.Speak("已返回章节选择", interrupt: true);
 		MarkNeedDetect();
+	}
+
+	private static void CloseStorylineFromChapterSelection()
+	{
+		_restoreStorylineNodeModeOnOpen = false;
+		ClearNodeMode("Close storyline from chapter selection");
+		_inOptionsMode = false;
+		_options = new OptionItem[0];
+		_currentOptionIndex = 0;
+		_inStorylineMode = false;
+		HideStorylinePageOnly();
+		_currentUIState = UIState.Unknown;
+		_lastDetectedSignature = "";
+		TolkHelper.Speak("已关闭故事线", interrupt: true);
+		MarkNeedDetect();
+		LogInputState("Close storyline from chapter selection");
 	}
 
 	private static void SpeakCurrentNode()
@@ -5218,6 +5279,7 @@ public class Plugin : BaseUnityPlugin
 
 	private static void AfterStorylineNodeJumpSuccess(object gameController, string reason)
 	{
+		RememberStorylineChapterContext(reason);
 		ClearNodeMode(reason);
 		_inOptionsMode = false;
 		_options = new OptionItem[0];
@@ -5229,6 +5291,53 @@ public class Plugin : BaseUnityPlugin
 		HideStorylinePageAfterNodeJump(gameController);
 		MarkNeedDetect();
 		LogInputState("After storyline node jump success: " + reason);
+	}
+
+	private static void RememberStorylineChapterContext(string reason)
+	{
+		int currentStorylineChapterFilter = GetCurrentStorylineChapterFilter();
+		if (currentStorylineChapterFilter <= 0 && _lastStorylineChapterNumber > 0)
+		{
+			currentStorylineChapterFilter = _lastStorylineChapterNumber;
+		}
+		if (currentStorylineChapterFilter <= 0)
+		{
+			Log.LogInfo((object)("[故事线] 未能记录章节上下文: " + reason));
+			return;
+		}
+		_lastStorylineChapterNumber = currentStorylineChapterFilter;
+		_restoreStorylineNodeModeOnOpen = true;
+		Log.LogInfo((object)$"[故事线] 已记录剧情章节上下文: chapter={_lastStorylineChapterNumber}, reason={reason}");
+	}
+
+	private static void HideStorylinePageOnly()
+	{
+		try
+		{
+			object activeObject = GetActiveObject(_gameControllerType);
+			object activeObject2 = GetActiveObject(_storylineUIManagerType);
+			object obj = GetFieldValue(activeObject, "storyLinePageToggle");
+			object gameObject = GetComponentGameObject(obj);
+			if (gameObject != null && SetGameObjectActive(gameObject, false))
+			{
+				Log.LogInfo((object)"[故事线] 已隐藏 storyLinePageToggle GameObject");
+				return;
+			}
+			object gameObject2 = GetComponentGameObject(activeObject2);
+			if (gameObject2 != null && SetGameObjectActive(gameObject2, false))
+			{
+				Log.LogInfo((object)"[故事线] 已隐藏 StorylineUIManager GameObject");
+				return;
+			}
+			if (InvokeNoArg(obj, "PerformHide") || InvokeNoArg(activeObject2, "Hide") || InvokeNoArg(activeObject2, "Close"))
+			{
+				Log.LogInfo((object)"[故事线] 已调用故事线隐藏方法");
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("[故事线] 关闭故事线页面失败: " + ex.Message));
+		}
 	}
 
 	private static void HideStorylinePageAfterNodeJump(object gameController)
@@ -6361,6 +6470,11 @@ public class Plugin : BaseUnityPlugin
 					ReturnToChapterSelectionFromNodeMode();
 					_suppressCurrentKey = true;
 				}
+				else if (_currentUIState == UIState.Storyline)
+				{
+					CloseStorylineFromChapterSelection();
+					_suppressCurrentKey = true;
+				}
 				else if (_inSettingsMode && _settings.Length != 0 && ActivateReturnSetting())
 				{
 					_suppressCurrentKey = true;
@@ -7137,6 +7251,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (flag)
 			{
+				_restoreStorylineNodeModeOnOpen = false;
 				_currentUIState = UIState.Storyline;
 				_lastDetectedSignature = GetStorylineSignature();
 				EnterStorylineMode();
