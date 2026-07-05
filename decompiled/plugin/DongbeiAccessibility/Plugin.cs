@@ -1109,17 +1109,17 @@ public class Plugin : BaseUnityPlugin
 	{
 		ResolveArchiveTypes();
 		object activeArchiveContentController = GetActiveArchiveContentController();
-		if (activeArchiveContentController != null && HasArchiveContentVisibleText(activeArchiveContentController))
+		if (activeArchiveContentController != null && IsArchiveControllerPageVisible(activeArchiveContentController, "") && HasArchiveContentVisibleText(activeArchiveContentController))
 		{
 			return true;
 		}
 		object activeCharacterDetailController = GetActiveCharacterDetailController();
-		if (activeCharacterDetailController != null && GetArchiveDetailItems(activeCharacterDetailController).Length > 0)
+		if (activeCharacterDetailController != null && IsArchiveControllerPageVisible(activeCharacterDetailController, "") && GetArchiveDetailItems(activeCharacterDetailController).Length > 0)
 		{
 			return true;
 		}
 		object activeArchiveHomeController = GetActiveArchiveHomeController();
-		return activeArchiveHomeController != null && GetArchiveHomeItems(activeArchiveHomeController).Length > 0;
+		return activeArchiveHomeController != null && IsArchiveControllerPageVisible(activeArchiveHomeController, "archivePageToggle") && GetArchiveHomeItems(activeArchiveHomeController).Length > 0;
 	}
 
 	private static string GetArchiveSignature()
@@ -1165,6 +1165,45 @@ public class Plugin : BaseUnityPlugin
 	private static object GetActiveArchiveContentController()
 	{
 		return GetActiveComponentObject(_archiveContentPageControllerType);
+	}
+
+	private static bool IsArchiveControllerPageVisible(object controller, string pageToggleFieldName)
+	{
+		if (controller == null)
+		{
+			return false;
+		}
+		object obj = null;
+		if (!string.IsNullOrEmpty(pageToggleFieldName))
+		{
+			obj = GetFieldValue(controller, pageToggleFieldName);
+		}
+		if (obj == null)
+		{
+			obj = GetComponentByType(controller, Type.GetType("ToggleHide, Assembly-CSharp"));
+		}
+		if (obj != null)
+		{
+			return IsToggleHideGameObjectActive(obj);
+		}
+		return IsComponentActiveInHierarchy(controller);
+	}
+
+	private static object GetComponentByType(object component, Type componentType)
+	{
+		if (component == null || componentType == null)
+		{
+			return null;
+		}
+		try
+		{
+			MethodInfo method = component.GetType().GetMethod("GetComponent", BindingFlags.Instance | BindingFlags.Public, null, new Type[1] { typeof(Type) }, null);
+			return method?.Invoke(component, new object[1] { componentType });
+		}
+		catch
+		{
+			return null;
+		}
 	}
 
 	private static object GetActiveComponentObject(Type type)
@@ -1235,7 +1274,7 @@ public class Plugin : BaseUnityPlugin
 		catch (Exception ex)
 		{
 			Log.LogError((object)("进入档案模式失败: " + ex.Message));
-			TolkHelper.Speak("档案界面", interrupt: true);
+			TolkHelper.Speak("没有找到档案项目", interrupt: true);
 		}
 	}
 
@@ -1248,12 +1287,11 @@ public class Plugin : BaseUnityPlugin
 		Log.LogInfo((object)$"进入{label}模式，共 {_archiveItems.Length} 项");
 		if (_archiveItems.Length > 0)
 		{
-			TolkHelper.Speak($"{label}，共 {_archiveItems.Length} 项。按上下光标切换，回车打开，Esc 返回", interrupt: true);
 			SpeakCurrentArchiveItem();
 		}
 		else
 		{
-			TolkHelper.Speak(label + "，没有找到可读项目。按 Esc 返回", interrupt: true);
+			TolkHelper.Speak(label + "，没有找到可读项目", interrupt: true);
 		}
 	}
 
@@ -1377,11 +1415,7 @@ public class Plugin : BaseUnityPlugin
 		}
 		if (string.IsNullOrWhiteSpace(text))
 		{
-			text = "档案内容页。按左右光标切换档案，Esc 返回";
-		}
-		else
-		{
-			text += "。按左右光标切换档案，Esc 返回";
+			text = "档案内容页";
 		}
 		TolkHelper.Speak(text, interrupt: true);
 	}
@@ -1490,7 +1524,7 @@ public class Plugin : BaseUnityPlugin
 		OptionItem optionItem = _archiveItems[_currentArchiveIndex];
 		string text = string.IsNullOrWhiteSpace(optionItem.Text) ? ("第 " + (_currentArchiveIndex + 1) + " 项") : optionItem.Text;
 		PlayGameSound("Highlight");
-		TolkHelper.Speak($"{_currentArchiveIndex + 1} / {_archiveItems.Length}: {text}", interrupt: true);
+		TolkHelper.Speak(text, interrupt: true);
 	}
 
 	private static void ActivateCurrentArchiveItem()
@@ -1614,7 +1648,6 @@ public class Plugin : BaseUnityPlugin
 		if (endingPageOptions != null && endingPageOptions.Length > 0)
 		{
 			SetOptions(endingPageOptions);
-			TolkHelper.Speak($"检测到结尾页面，共 {endingPageOptions.Length} 项。按上下光标查看，按回车确认按钮或重读提示", interrupt: true);
 			return;
 		}
 		OptionItem[] clickableOptions = GetClickableOptions();
@@ -1624,13 +1657,6 @@ public class Plugin : BaseUnityPlugin
 			return;
 		}
 		SetOptions(SortOptions(clickableOptions));
-		string arg = (_isHorizontalLayout ? "横向" : "纵向");
-		TolkHelper.Speak($"检测到 {clickableOptions.Length} 个选项，{arg}排列，按上下左右切换，按回车确认", interrupt: true);
-		if (_options != null && _options.Length != 0)
-		{
-			Thread.Sleep(500);
-			TolkHelper.Speak("第1项，" + _options[0].Text);
-		}
 	}
 
 	private static OptionItem[] GetOptionsFromGameController()
@@ -2011,7 +2037,7 @@ public class Plugin : BaseUnityPlugin
 			OptionItem[] allVisibleTextsWithPosition = GetAllVisibleTextsWithPosition();
 			if (allVisibleTextsWithPosition == null || allVisibleTextsWithPosition.Length == 0)
 			{
-				TolkHelper.Speak("设置界面", interrupt: true);
+				TolkHelper.Speak("没有设置项", interrupt: true);
 				return;
 			}
 			List<SettingItem> list = new List<SettingItem>();
@@ -2027,7 +2053,6 @@ public class Plugin : BaseUnityPlugin
 				_currentSettingIndex = 0;
 				_inSettingsMode = true;
 				_inOptionsMode = false;
-				TolkHelper.Speak($"设置界面，共 {array2.Length} 个选项，按上下光标切换，按左右调整数值，按回车确认", interrupt: true);
 				if (array2.Length != 0)
 				{
 					SpeakCurrentSetting();
@@ -2035,13 +2060,13 @@ public class Plugin : BaseUnityPlugin
 			}
 			else
 			{
-				TolkHelper.Speak("设置界面", interrupt: true);
+				TolkHelper.Speak("没有设置项", interrupt: true);
 			}
 		}
 		catch (Exception ex)
 		{
 			Log.LogError((object)("进入设置模式失败: " + ex.Message));
-			TolkHelper.Speak("设置界面", interrupt: true);
+			TolkHelper.Speak("没有设置项", interrupt: true);
 		}
 	}
 
@@ -3406,28 +3431,9 @@ public class Plugin : BaseUnityPlugin
 		}
 		SettingItem settingItem = _settings[_currentSettingIndex];
 		string settingValueText = GetSettingValueText(settingItem);
-		string text = "";
-		switch (settingItem.Type)
-		{
-		case SettingItem.SettingType.Toggle:
-			text = "，回车切换";
-			break;
-		case SettingItem.SettingType.Slider:
-			text = "，左右调整";
-			break;
-		case SettingItem.SettingType.Dropdown:
-			text = "，左右切换";
-			break;
-		case SettingItem.SettingType.Button:
-			text = "，回车确认";
-			break;
-		case SettingItem.SettingType.Text:
-			text = "";
-			break;
-		}
 		PlayGameSound("Highlight");
 		string text2 = string.IsNullOrWhiteSpace(settingValueText) ? settingItem.Name : (settingItem.Name + " " + settingValueText);
-		TolkHelper.Speak($"{_currentSettingIndex + 1} / {_settings.Length}: {text2}{text}", interrupt: true);
+		TolkHelper.Speak(text2, interrupt: true);
 	}
 
 	private static bool ActivateCurrentSetting()
@@ -4329,7 +4335,7 @@ public class Plugin : BaseUnityPlugin
 			foreach (ChapterInfo chapterInfo in array2.OrderBy((ChapterInfo c) => c.ChapterNumber).ThenBy((ChapterInfo c) => c.Index))
 		{
 			OptionItem optionItem = new OptionItem();
-			string text = chapterInfo.Name;
+			string text = $"章节 {chapterInfo.ChapterNumber}，{chapterInfo.Name}";
 			if (chapterInfo.IsLocked)
 			{
 				text += "（已锁定）";
@@ -4351,7 +4357,6 @@ public class Plugin : BaseUnityPlugin
 		{
 			log.LogInfo((object)"[故事线] 强制设置为横向排列");
 		}
-		TolkHelper.Speak($"故事线页面，共 {storylineChapters.Length} 个章节，已进入章节选择模式。按左右光标切换章节，按回车进入", interrupt: true);
 	}
 
 	private static bool TryRestoreStorylineNodeModeOnOpen()
@@ -4999,7 +5004,7 @@ public class Plugin : BaseUnityPlugin
 		_inNodeMode = true;
 		_storylineNodes = storylineNodes;
 		_currentNodeIndex = 0;
-		TolkHelper.Speak($"进入节点浏览模式，共 {storylineNodes.Length} 个节点。按上下光标切换节点，按回车跳转到该节点，按F3跳转到当前进度节点", interrupt: true);
+		SpeakCurrentNode();
 		ManualLogSource log = Log;
 		if (log != null)
 		{
@@ -5034,7 +5039,7 @@ public class Plugin : BaseUnityPlugin
 						_storylineNodes = storylineNodes;
 						_currentNodeIndex = 0;
 						_currentUIState = UIState.Storyline;
-						TolkHelper.Speak($"已进入节点浏览模式，共 {storylineNodes.Length} 个节点。按上下光标切换节点，按回车跳转到该节点", interrupt: true);
+						SpeakCurrentNode();
 						ManualLogSource log = Log;
 						if (log != null)
 						{
@@ -5057,7 +5062,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				log3.LogWarning((object)$"[故事线] 点击章节后没有等到目标章节节点，保持章节选择模式，expected={expectedChapterNumber}, current={GetCurrentStorylineChapterFilter()}");
 			}
-			TolkHelper.Speak("章节还没有加载完成，请稍后再按回车进入", interrupt: true);
+			TolkHelper.Speak("章节还没有加载完成，请稍后再试", interrupt: true);
 		});
 	}
 
@@ -5133,7 +5138,7 @@ public class Plugin : BaseUnityPlugin
 		{
 			OptionItem optionItem = _storylineNodes[_currentNodeIndex];
 			PlayGameSound("Highlight");
-			TolkHelper.Speak($"{_currentNodeIndex + 1}/{_storylineNodes.Length} {optionItem.Text}", interrupt: true);
+			TolkHelper.Speak(optionItem.Text, interrupt: true);
 		}
 	}
 
@@ -5314,30 +5319,83 @@ public class Plugin : BaseUnityPlugin
 	{
 		try
 		{
+			Type type = Type.GetType("MainMenuManager, Assembly-CSharp");
+			object activeObject0 = GetActiveObject(type);
 			object activeObject = GetActiveObject(_gameControllerType);
 			object activeObject2 = GetActiveObject(_storylineUIManagerType);
-			object obj = GetFieldValue(activeObject, "storyLinePageToggle");
+			object obj = GetFieldValue(activeObject0, "storyLinePageToggle") ?? GetFieldValue(activeObject, "storyLinePageToggle");
+			if (InvokeAnyNoArg(activeObject2, "BackToMainMenu", "TestBackToMainMenu"))
+			{
+				HideStorylineToggleIfStillVisible(obj);
+				Log.LogInfo((object)"[故事线] 已调用 StorylineUIManager 返回主菜单流程");
+				return;
+			}
+			if (InvokeAnyNoArg(obj, "PerformHide", "Hide", "Close", "ClosePanel"))
+			{
+				Log.LogInfo((object)"[故事线] 已调用 storyLinePageToggle 关闭方法");
+				return;
+			}
+			if (InvokeAnyNoArg(activeObject2, "Hide", "Close", "CloseStoryline", "HideStoryline", "OnClose", "OnBack", "ReturnToMain"))
+			{
+				Log.LogInfo((object)"[故事线] 已调用 StorylineUIManager 关闭方法");
+				return;
+			}
+			if (InvokeAnyNoArg(activeObject0, "CloseStoryLine", "CloseStoryline", "HideStoryLine", "HideStoryline", "OnStoryLineBack", "OnStorylineBack", "Back"))
+			{
+				Log.LogInfo((object)"[故事线] 已调用 MainMenuManager 故事线关闭方法");
+				return;
+			}
 			object gameObject = GetComponentGameObject(obj);
 			if (gameObject != null && SetGameObjectActive(gameObject, false))
 			{
-				Log.LogInfo((object)"[故事线] 已隐藏 storyLinePageToggle GameObject");
+				Log.LogWarning((object)"[故事线] 未找到原生关闭方法，兜底隐藏 storyLinePageToggle GameObject");
 				return;
 			}
 			object gameObject2 = GetComponentGameObject(activeObject2);
 			if (gameObject2 != null && SetGameObjectActive(gameObject2, false))
 			{
-				Log.LogInfo((object)"[故事线] 已隐藏 StorylineUIManager GameObject");
+				Log.LogWarning((object)"[故事线] 未找到原生关闭方法，兜底隐藏 StorylineUIManager GameObject");
 				return;
-			}
-			if (InvokeNoArg(obj, "PerformHide") || InvokeNoArg(activeObject2, "Hide") || InvokeNoArg(activeObject2, "Close"))
-			{
-				Log.LogInfo((object)"[故事线] 已调用故事线隐藏方法");
 			}
 		}
 		catch (Exception ex)
 		{
 			Log.LogWarning((object)("[故事线] 关闭故事线页面失败: " + ex.Message));
 		}
+	}
+
+	private static void HideStorylineToggleIfStillVisible(object storyLinePageToggle)
+	{
+		if (storyLinePageToggle == null || !IsToggleHideGameObjectActive(storyLinePageToggle))
+		{
+			return;
+		}
+		if (InvokeAnyNoArg(storyLinePageToggle, "PerformHide"))
+		{
+			Log.LogInfo((object)"[故事线] 返回主菜单后 storyLinePageToggle 仍显示，已调用 PerformHide");
+			return;
+		}
+		object gameObject = GetComponentGameObject(storyLinePageToggle);
+		if (gameObject != null && SetGameObjectActive(gameObject, false))
+		{
+			Log.LogWarning((object)"[故事线] 返回主菜单后 storyLinePageToggle 仍显示，已兜底隐藏 GameObject");
+		}
+	}
+
+	private static bool InvokeAnyNoArg(object obj, params string[] methodNames)
+	{
+		if (obj == null || methodNames == null)
+		{
+			return false;
+		}
+		foreach (string methodName in methodNames)
+		{
+			if (InvokeNoArg(obj, methodName))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	private static void HideStorylinePageAfterNodeJump(object gameController)
@@ -6028,7 +6086,7 @@ public class Plugin : BaseUnityPlugin
 			if (array == null || array.Length == 0)
 			{
 				Log.LogInfo((object)"没有找到 QTEController 实例");
-				TolkHelper.Speak("当前没有检测到 QTE", interrupt: true);
+				TolkHelper.Speak("当前没有 QTE", interrupt: true);
 				return;
 			}
 			Log.LogInfo((object)$"找到 {array.Length} 个 QTEController 实例");
@@ -7393,7 +7451,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			string text2 = (string.IsNullOrEmpty(optionItem.Text) ? "（无文字）" : optionItem.Text);
 			PlayGameSound("Highlight");
-			TolkHelper.Speak($"{_currentOptionIndex + 1} / {_options.Length}: {text2}{text}", interrupt: true);
+			TolkHelper.Speak(text2 + text, interrupt: true);
 		}
 	}
 
@@ -7610,8 +7668,6 @@ public class Plugin : BaseUnityPlugin
 			{
 				Log.LogInfo((object)$"找到 {list.Count} 个可点击组件");
 				SetOptions(SortOptions(list.ToArray()));
-				string arg = (_isHorizontalLayout ? "横向" : "纵向");
-				TolkHelper.Speak($"检测到 {list.Count} 个可点击元素，{arg}排列，已进入选项模式。按上下左右光标切换，按回车点击", interrupt: true);
 				return;
 			}
 			Log.LogInfo((object)"没有找到可点击组件，尝试用短文本猜测");
@@ -7629,18 +7685,16 @@ public class Plugin : BaseUnityPlugin
 			{
 				Log.LogInfo((object)$"检测到可能的选项 {list.Count} 个");
 				SetOptions(SortOptions(list.ToArray()));
-				string arg2 = (_isHorizontalLayout ? "横向" : "纵向");
-				TolkHelper.Speak($"检测到 {list.Count} 个可能的选项，{arg2}排列，已进入选项模式。按上下左右光标切换，按回车点击", interrupt: true);
 			}
 			else if (list.Count > 12)
 			{
 				Log.LogInfo((object)$"候选选项太多（{list.Count}个）");
-				TolkHelper.Speak($"找到 {list.Count} 段短文本，无法确定是否为选项。按 F8 朗读全部，按回车点击屏幕中间", interrupt: true);
+				TolkHelper.Speak($"找到 {list.Count} 段短文本，无法确定是否为选项", interrupt: true);
 			}
 			else
 			{
 				Log.LogInfo((object)$"候选选项太少（{list.Count}个）");
-				TolkHelper.Speak("没有检测到明显的选项，按回车点击屏幕中间", interrupt: true);
+				TolkHelper.Speak("没有明显选项", interrupt: true);
 			}
 		}
 		catch (Exception ex)
