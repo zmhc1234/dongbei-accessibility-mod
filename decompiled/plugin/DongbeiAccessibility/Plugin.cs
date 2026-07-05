@@ -1653,8 +1653,13 @@ public class Plugin : BaseUnityPlugin
 		OptionItem[] clickableOptions = GetClickableOptions();
 		if (clickableOptions == null || clickableOptions.Length == 0)
 		{
-			LeaveOptions();
-			return;
+			clickableOptions = GetExploreInteractionOptions();
+			if (clickableOptions == null || clickableOptions.Length == 0)
+			{
+				LeaveOptions();
+				return;
+			}
+			Log.LogInfo((object)$"[探索] 进入探索交互模式，共 {clickableOptions.Length} 个交互点");
 		}
 		SetOptions(SortOptions(clickableOptions));
 	}
@@ -5866,7 +5871,7 @@ public class Plugin : BaseUnityPlugin
 					continue;
 				}
 				OptionItem optionItem = new OptionItem();
-				optionItem.Text = "探索交互点 " + (list.Count + 1);
+				optionItem.Text = (list.Count == 0) ? "了解完毕，继续" : ("探索交互点 " + (list.Count + 1));
 				optionItem.ClickableComponent = item;
 				if (TryGetScreenPosition(GetGameObjectFromComponent(item), out var x, out var y))
 				{
@@ -6954,6 +6959,10 @@ public class Plugin : BaseUnityPlugin
 					{
 						ClearCurrentOptionsAfterTransientClick("confirmation dialog click");
 					}
+					if (IsExploreInteractionOption(optionItem))
+					{
+						ClearCurrentOptionsAfterTransientClick("explore interaction click");
+					}
 					return;
 				}
 				ManualLogSource log7 = Log;
@@ -6977,6 +6986,10 @@ public class Plugin : BaseUnityPlugin
 			if (flag3)
 			{
 				ClearCurrentOptionsAfterTransientClick("confirmation dialog mouse click");
+			}
+			if (IsExploreInteractionOption(optionItem))
+			{
+				ClearCurrentOptionsAfterTransientClick("explore interaction mouse click");
 			}
 		}
 		else
@@ -7011,6 +7024,12 @@ public class Plugin : BaseUnityPlugin
 	private static bool IsGameControllerStoryOption(OptionItem optionItem)
 	{
 		return optionItem != null && optionItem.Index >= 0 && optionItem.ClickableComponent != null && _gameControllerType != null && optionItem.ClickableComponent.GetType() == _gameControllerType;
+	}
+
+	private static bool IsExploreInteractionOption(OptionItem optionItem)
+	{
+		string text = optionItem?.Text?.Trim();
+		return !string.IsNullOrEmpty(text) && (text.StartsWith("探索交互点", StringComparison.Ordinal) || text.Contains("了解完毕"));
 	}
 
 	private static bool IsConfirmationDialogOption(OptionItem optionItem)
