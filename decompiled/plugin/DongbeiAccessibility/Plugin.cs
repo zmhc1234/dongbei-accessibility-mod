@@ -206,6 +206,7 @@ public class Plugin : BaseUnityPlugin
 	private static readonly Dictionary<int, bool> _keyWasDown = new Dictionary<int, bool>();
 
 	private static readonly Dictionary<int, DateTime> _nextRepeatTimeUtc = new Dictionary<int, DateTime>();
+	private static readonly Dictionary<string, object> _gameNodeCache = new Dictionary<string, object>();
 
 	private const int KEY_REPEAT_INITIAL_DELAY_MS = 350;
 
@@ -2798,6 +2799,28 @@ public class Plugin : BaseUnityPlugin
 		catch
 		{
 			return null;
+		}
+	}
+
+	private static bool SetFieldValue(object obj, string fieldName, object value)
+	{
+		if (obj == null || string.IsNullOrEmpty(fieldName))
+		{
+			return false;
+		}
+		try
+		{
+			FieldInfo field = obj.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+			if (field == null)
+			{
+				return false;
+			}
+			field.SetValue(obj, value);
+			return true;
+		}
+		catch
+		{
+			return false;
 		}
 	}
 
@@ -5871,7 +5894,7 @@ public class Plugin : BaseUnityPlugin
 					continue;
 				}
 				OptionItem optionItem = new OptionItem();
-				optionItem.Text = (list.Count == 0) ? "了解完毕，继续" : ("探索交互点 " + (list.Count + 1));
+				optionItem.Text = (list.Count == 0) ? "继续" : ("探索交互点 " + (list.Count + 1));
 				optionItem.ClickableComponent = item;
 				if (TryGetScreenPosition(GetGameObjectFromComponent(item), out var x, out var y))
 				{
@@ -5905,15 +5928,12 @@ public class Plugin : BaseUnityPlugin
 			return false;
 		}
 		Type type = component.GetType();
-		FieldInfo field = type.GetField("onClick", BindingFlags.Instance | BindingFlags.Public) ?? type.GetField("onClick", BindingFlags.Instance | BindingFlags.NonPublic);
-		object obj = field?.GetValue(component);
-		if (obj != null && obj.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public) != null)
+		object obj;
+		if (TryGetEventLikeMember(type, component, "onClick", out obj) && HasPublicInvoke(obj))
 		{
 			return true;
 		}
-		PropertyInfo property = type.GetProperty("onClick", BindingFlags.Instance | BindingFlags.Public);
-		obj = property?.GetValue(component);
-		return obj != null && obj.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public) != null;
+		return HasNoArgMethod(type, "OnClick") || HasNoArgMethod(type, "Click") || HasNoArgMethod(type, "OnMouseDown") || HasNoArgMethod(type, "Trigger") || HasNoArgMethod(type, "OnTrigger");
 	}
 
 	private static void SpeakQTEPrompt(object qteController, bool allowRecentRepeat)
@@ -6937,6 +6957,11 @@ public class Plugin : BaseUnityPlugin
 			{
 				return;
 			}
+			if (IsExploreInteractionOption(optionItem) && TryActivateRevisitableContinue())
+			{
+				ClearCurrentOptionsAfterTransientClick("revisitable continue direct");
+				return;
+			}
 			if (optionItem.ClickableComponent != null)
 			{
 				ManualLogSource log5 = Log;
@@ -7029,7 +7054,263 @@ public class Plugin : BaseUnityPlugin
 	private static bool IsExploreInteractionOption(OptionItem optionItem)
 	{
 		string text = optionItem?.Text?.Trim();
-		return !string.IsNullOrEmpty(text) && (text.StartsWith("探索交互点", StringComparison.Ordinal) || text.Contains("了解完毕"));
+		return !string.IsNullOrEmpty(text) && (text.StartsWith("探索交互点", StringComparison.Ordinal) || text.Contains("了解完毕") || text.Equals("继续", StringComparison.Ordinal));
+	}
+
+	private static bool TryActivateRevisitableContinue()
+	{
+		if (_gameControllerType == null)
+		{
+			return false;
+		}
+		try
+		{
+			object activeObject = GetActiveObject(_gameControllerType);
+			if (activeObject == null)
+			{
+				return false;
+			}
+			object fieldValue = GetFieldValue(activeObject, "currentNode");
+			object fieldValue2 = GetFieldValue(fieldValue, "nextNodeAfterAllOptions");
+			object fieldValue3 = GetFieldValue(activeObject, "parentRevisitableNode");
+			Log.LogInfo((object)("[循环选项] 当前节点=" + GetGameNodeId(fieldValue) + ", nextNodeAfterAllOptions=" + GetGameNodeId(fieldValue2) + ", parentRevisitableNode=" + GetGameNodeId(fieldValue3)));
+			if (TryActivateKnownBrokenRevisitableContinue(activeObject, fieldValue))
+			{
+				return true;
+			}
+			if (fieldValue2 == null && fieldValue != null && fieldValue3 != null)
+			{
+				object obj = FindRevisitableParentNodeForChild(fieldValue);
+				object fieldValue4 = GetFieldValue(obj, "nextNodeAfterAllOptions");
+				Log.LogInfo((object)("[循环选项] 反查父节点=" + GetGameNodeId(obj) + ", 父节点继续目标=" + GetGameNodeId(fieldValue4)));
+				if (obj != null && fieldValue4 != null)
+				{
+					fieldValue3 = obj;
+					fieldValue2 = fieldValue4;
+				}
+			}
+			if (fieldValue != null && fieldValue2 != null)
+			{
+				return ActivateGameNode(activeObject, fieldValue2, "[循环选项] 已直接进入全部选项后的继续节点");
+			}
+			if (fieldValue != null)
+			{
+				MethodInfo method2 = _gameControllerType.GetMethod("PlayingEnded", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+				if (method2 != null)
+				{
+					method2.Invoke(activeObject, null);
+					Log.LogInfo((object)"[循环选项] 已调用 GameController.PlayingEnded 处理继续");
+					return true;
+				}
+			}
+			return false;
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("[循环选项] 直接继续失败: " + ex.GetType().Name + " - " + ex.Message));
+			return false;
+		}
+	}
+
+	private static bool TryActivateKnownBrokenRevisitableContinue(object gameController, object currentNode)
+	{
+		string gameNodeId = GetGameNodeId(currentNode);
+		if (gameController == null || string.IsNullOrWhiteSpace(gameNodeId))
+		{
+			return false;
+		}
+		if (gameNodeId == "03039")
+		{
+			object gameNode2 = GetFieldValue(currentNode, "nextNode") ?? GetGameNodeFromRegistry("03040");
+			return gameNode2 != null && ActivateGameNode(gameController, gameNode2, "[循环选项] 已从继续节点跳到后续节点: " + GetGameNodeId(gameNode2));
+		}
+		if (gameNodeId != "03035" && gameNodeId != "03036" && gameNodeId != "03037" && gameNodeId != "03038")
+		{
+			return false;
+		}
+		object gameNode = GetGameNodeFromRegistry("03039") ?? GetGameNodeFromRegistry("03040");
+		if (gameNode == null)
+		{
+			Log.LogWarning((object)("[循环选项] 无法从 GameNodeRegistry 获取 03039/03040"));
+			return false;
+		}
+		if (ActivateGameNode(gameController, gameNode, "[循环选项] 已针对谁是主谋预览节点跳到继续节点: " + GetGameNodeId(gameNode)))
+		{
+			return true;
+		}
+		return false;
+	}
+
+	private static object GetGameNodeFromRegistry(string nodeId)
+	{
+		if (string.IsNullOrWhiteSpace(nodeId))
+		{
+			return null;
+		}
+		if (_gameNodeCache.TryGetValue(nodeId, out var value))
+		{
+			return value;
+		}
+		try
+		{
+			Type type = Type.GetType("GameNodeRegistry, Assembly-CSharp");
+			object activeObject = GetActiveObject(type);
+			if (activeObject == null)
+			{
+				PropertyInfo property = type?.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public);
+				activeObject = property?.GetValue(null);
+			}
+			MethodInfo method = type?.GetMethod("GetGameNode", BindingFlags.Instance | BindingFlags.Public);
+			object obj = method?.Invoke(activeObject, new object[1] { nodeId });
+			if (obj != null)
+			{
+				_gameNodeCache[nodeId] = obj;
+				Log.LogInfo((object)("[循环选项] 从 GameNodeRegistry 获取节点成功: " + nodeId));
+			}
+			return obj;
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[循环选项] 从 GameNodeRegistry 获取节点失败: " + nodeId + ", " + ex.Message));
+			return null;
+		}
+	}
+
+	private static bool ActivateGameNode(object gameController, object targetNode, string successLog)
+	{
+		if (gameController == null || targetNode == null || _gameControllerType == null)
+		{
+			return false;
+		}
+		try
+		{
+			SetFieldValue(gameController, "parentRevisitableNode", null);
+			InvokeNoArg(gameController, "HideFullScreenButtons");
+			MethodInfo method = _gameControllerType.GetMethod("OnEnterNewNode", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+			if (method == null)
+			{
+				return false;
+			}
+			method.Invoke(gameController, new object[1] { targetNode });
+			InvokeNoArg(gameController, "InitPlayer");
+			Log.LogInfo((object)successLog);
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("[循环选项] 激活节点失败: " + ex.GetType().Name + " - " + ex.Message));
+			return false;
+		}
+	}
+
+	private static object FindRevisitableParentNodeForChild(object childNode)
+	{
+		if (childNode == null || _gameNodeType == null || _gameOptionType == null)
+		{
+			return null;
+		}
+		string gameNodeId = GetGameNodeId(childNode);
+		try
+		{
+			Array array = FindObjectsOfType(_gameNodeType);
+			object obj = FindRevisitableParentNodeForChild(childNode, gameNodeId, array);
+			if (obj != null)
+			{
+				return obj;
+			}
+			Type type = Type.GetType("GameNodeRegistry, Assembly-CSharp");
+			object activeObject = GetActiveObject(type);
+			foreach (string fieldName in new string[6] { "allNodes", "nodes", "gameNodes", "nodeList", "nodeRegistry", "nodeMap" })
+			{
+				obj = FindRevisitableParentNodeForChild(childNode, gameNodeId, GetFieldValue(activeObject, fieldName));
+				if (obj != null)
+				{
+					return obj;
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[循环选项] 反查父节点失败: " + ex.Message));
+		}
+		return null;
+	}
+
+	private static object FindRevisitableParentNodeForChild(object childNode, string childNodeId, object candidates)
+	{
+		foreach (object candidate in EnumerateObjects(candidates))
+		{
+			object obj = ExtractGameNode(candidate);
+			if (obj == null)
+			{
+				continue;
+			}
+			object fieldValue = GetFieldValue(obj, "options");
+			if (fieldValue == null || GetFieldValue(obj, "nextNodeAfterAllOptions") == null)
+			{
+				continue;
+			}
+			foreach (object item in EnumerateObjects(fieldValue))
+			{
+				object fieldValue2 = GetFieldValue(item, "node");
+				if (fieldValue2 == null)
+				{
+					continue;
+				}
+				if (object.ReferenceEquals(fieldValue2, childNode) || (!string.IsNullOrWhiteSpace(childNodeId) && childNodeId != "<null>" && childNodeId == GetGameNodeId(fieldValue2)))
+				{
+					return obj;
+				}
+			}
+		}
+		return null;
+	}
+
+	private static object ExtractGameNode(object value)
+	{
+		if (value == null)
+		{
+			return null;
+		}
+		if (_gameNodeType != null && _gameNodeType.IsInstanceOfType(value))
+		{
+			return value;
+		}
+		if (value is System.Collections.DictionaryEntry dictionaryEntry)
+		{
+			return ExtractGameNode(dictionaryEntry.Value) ?? ExtractGameNode(dictionaryEntry.Key);
+		}
+		object fieldValue = GetFieldValue(value, "node");
+		if (_gameNodeType != null && _gameNodeType.IsInstanceOfType(fieldValue))
+		{
+			return fieldValue;
+		}
+		return null;
+	}
+
+	private static string GetGameNodeId(object node)
+	{
+		if (node == null)
+		{
+			return "<null>";
+		}
+		try
+		{
+			object fieldValue = GetFieldValue(node, "nodeId");
+			if (fieldValue != null)
+			{
+				return fieldValue.ToString();
+			}
+			object obj = node as UnityEngine.Object;
+			if (obj != null)
+			{
+				return ((UnityEngine.Object)obj).name;
+			}
+		}
+		catch
+		{
+		}
+		return node.GetType().Name;
 	}
 
 	private static bool IsConfirmationDialogOption(OptionItem optionItem)
@@ -7383,6 +7664,112 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
+	private static bool TryGetEventLikeMember(Type type, object component, string memberName, out object value)
+	{
+		value = null;
+		if (type == null || component == null || string.IsNullOrEmpty(memberName))
+		{
+			return false;
+		}
+		try
+		{
+			FieldInfo field = type.GetField(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+			if (field != null)
+			{
+				value = field.GetValue(component);
+				if (value != null)
+				{
+					return true;
+				}
+			}
+			PropertyInfo property = type.GetProperty(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+			if (property != null && property.GetIndexParameters().Length == 0)
+			{
+				value = property.GetValue(component);
+				return value != null;
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("读取 " + type.Name + "." + memberName + " 失败: " + ex.Message));
+		}
+		return false;
+	}
+
+	private static bool HasPublicInvoke(object value)
+	{
+		return value != null && value.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public) != null;
+	}
+
+	private static bool HasNoArgMethod(Type type, string methodName)
+	{
+		MethodInfo method = type?.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+		return method != null && method.GetParameters().Length == 0;
+	}
+
+	private static bool TryInvokeEventLikeMember(Type type, object component, string memberName)
+	{
+		if (!TryGetEventLikeMember(type, component, memberName, out var value) || value == null)
+		{
+			return false;
+		}
+		try
+		{
+			MethodInfo method = value.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public);
+			if (method == null)
+			{
+				return false;
+			}
+			ParameterInfo[] parameters = method.GetParameters();
+			object[] parameters2 = null;
+			if (parameters.Length != 0)
+			{
+				parameters2 = new object[parameters.Length];
+				for (int i = 0; i < parameters2.Length; i++)
+				{
+					parameters2[i] = GetDefaultValue(parameters[i].ParameterType);
+				}
+			}
+			method.Invoke(value, parameters2);
+			Log.LogInfo((object)(type.Name + "." + memberName + ".Invoke() 调用成功"));
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("调用 " + type.Name + "." + memberName + ".Invoke() 失败: " + ex.Message));
+			return false;
+		}
+	}
+
+	private static object GetDefaultValue(Type type)
+	{
+		if (type == null || !type.IsValueType)
+		{
+			return null;
+		}
+		return Activator.CreateInstance(type);
+	}
+
+	private static bool TryInvokeNoArgClickMethod(Type type, object component, string methodName)
+	{
+		try
+		{
+			MethodInfo method = type.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+			if (method == null || method.GetParameters().Length != 0)
+			{
+				return false;
+			}
+			method.Invoke(component, null);
+			Log.LogInfo((object)(type.Name + "." + methodName + "() 调用成功"));
+			return true;
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("调用 " + type.Name + "." + methodName + "() 失败: " + ex.Message));
+			return false;
+		}
+	}
+
 	private static bool ClickComponent(object component)
 	{
 		try
@@ -7392,19 +7779,16 @@ public class Plugin : BaseUnityPlugin
 				return false;
 			}
 			Type type = component.GetType();
-			PropertyInfo property = type.GetProperty("onClick", BindingFlags.Instance | BindingFlags.Public);
-			if (property != null)
+			if (TryInvokeEventLikeMember(type, component, "onClick"))
 			{
-				object value = property.GetValue(component);
-				if (value != null)
+				return true;
+			}
+			string[] array = new string[6] { "OnClick", "Click", "OnMouseDown", "Trigger", "OnTrigger", "Invoke" };
+			foreach (string methodName in array)
+			{
+				if (TryInvokeNoArgClickMethod(type, component, methodName))
 				{
-					MethodInfo method = value.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public);
-					if (method != null)
-					{
-						method.Invoke(value, null);
-						Log.LogInfo((object)(type.Name + ".onClick.Invoke() 调用成功"));
-						return true;
-					}
+					return true;
 				}
 			}
 			if (type.GetProperty("onValueChanged", BindingFlags.Instance | BindingFlags.Public) != null)
