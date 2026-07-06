@@ -80,9 +80,19 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool _restoreStorylineNodeModeOnOpen;
 
+	private static DateTime _ignoreStorylineCloseUntilUtc = DateTime.MinValue;
+
+	private static DateTime _lastSuppressedStorylineNavUtc = DateTime.MinValue;
+
+	private static int _lastSuppressedStorylineNavKey = 0;
+
 	private static int _storylineMissCount = 0;
 
 	private const int STORYLINE_MISS_THRESHOLD = 3;
+
+	private const int STORYLINE_RETURN_CLOSE_GUARD_MS = 250;
+
+	private const int STORYLINE_NAV_REPEAT_GUARD_MS = 250;
 
 	private static int _optionsMissCount = 0;
 
@@ -121,6 +131,16 @@ public class Plugin : BaseUnityPlugin
 	private static bool _narrationTypesResolved = false;
 
 	private static string _lastNarrationSpeakText = "";
+
+	private static DateTime _lastEventValueSpeakUtc = DateTime.MinValue;
+
+	private static string _lastEventValueSpeakText = "";
+
+	private static DateTime _lastStoryContinueCheckUtc = DateTime.MinValue;
+
+	private static DateTime _lastStoryContinueActivateUtc = DateTime.MinValue;
+
+	private static string _lastStoryContinueNodeId = "";
 
 	private static UIState _currentUIState = UIState.Unknown;
 
@@ -386,30 +406,50 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			Log.LogInfo((object)"QTE 自动跳过补丁已应用");
+			ApplyEventValueChangePatches(_harmony);
+			Log.LogInfo((object)"剧情数值变化通知补丁已应用");
 		}
 		catch (Exception ex2)
 		{
-			Log.LogError((object)("应用 QTE 补丁失败: " + ex2.GetType().Name + " - " + ex2.Message));
+			Log.LogError((object)("应用剧情数值变化通知补丁失败: " + ex2.GetType().Name + " - " + ex2.Message));
 			Log.LogError((object)("堆栈跟踪: " + ex2.StackTrace));
+		}
+		try
+		{
+			ApplyStoryContinuePatches(_harmony);
+			Log.LogInfo((object)"剧情继续按钮自动处理补丁已应用");
+		}
+		catch (Exception ex3)
+		{
+			Log.LogError((object)("应用剧情继续按钮补丁失败: " + ex3.GetType().Name + " - " + ex3.Message));
+			Log.LogError((object)("堆栈跟踪: " + ex3.StackTrace));
+		}
+		try
+		{
+			Log.LogInfo((object)"QTE 自动跳过补丁已应用");
+		}
+		catch (Exception ex4)
+		{
+			Log.LogError((object)("应用 QTE 补丁失败: " + ex4.GetType().Name + " - " + ex4.Message));
+			Log.LogError((object)("堆栈跟踪: " + ex4.StackTrace));
 		}
 		try
 		{
 			InstallKeyboardHook();
 			Log.LogInfo((object)"系统键盘钩子仅用于 QTE 空格拦截，其他按键继续由轮询处理");
 		}
-		catch (Exception ex3)
+		catch (Exception ex5)
 		{
-			Log.LogError((object)("安装键盘钩子失败: " + ex3.GetType().Name + " - " + ex3.Message));
-			Log.LogError((object)("堆栈跟踪: " + ex3.StackTrace));
+			Log.LogError((object)("安装键盘钩子失败: " + ex5.GetType().Name + " - " + ex5.Message));
+			Log.LogError((object)("堆栈跟踪: " + ex5.StackTrace));
 		}
 		try
 		{
 			StartAutoDetectTimer();
 		}
-		catch (Exception ex4)
+		catch (Exception ex6)
 		{
-			Log.LogError((object)("启动自动检测定时器失败: " + ex4.GetType().Name + " - " + ex4.Message));
+			Log.LogError((object)("启动自动检测定时器失败: " + ex6.GetType().Name + " - " + ex6.Message));
 		}
 		Log.LogInfo((object)"插件加载完成！");
 		Log.LogInfo((object)"提示：全自动模式已启用，自动识别界面，上下左右切换选项，回车确认");
@@ -663,6 +703,7 @@ public class Plugin : BaseUnityPlugin
 			if (IsGameWindowActive())
 			{
 				PollKeyboardInput();
+				CheckStoryContinueAutomation();
 				if (_needDetect)
 				{
 					CheckNarrationSpeak();
@@ -1068,6 +1109,37 @@ public class Plugin : BaseUnityPlugin
 		return DateTime.UtcNow < _suppressSpaceUntilUtc || IsQTEInputActive();
 	}
 
+	private static bool ShouldSuppressStorylineNavigationKeyForGame(int vkCode)
+	{
+		if (IsModifierKeyDown())
+		{
+			return false;
+		}
+		if (vkCode == VK_ESCAPE)
+		{
+			return _inNodeMode || _currentUIState == UIState.Storyline;
+		}
+		if (vkCode == VK_BACK)
+		{
+			return _inNodeMode || _currentUIState == UIState.Storyline;
+		}
+		return false;
+	}
+
+	private static void HandleSuppressedStorylineNavigationKey(int vkCode)
+	{
+		DateTime utcNow = DateTime.UtcNow;
+		if (vkCode == _lastSuppressedStorylineNavKey && (utcNow - _lastSuppressedStorylineNavUtc).TotalMilliseconds < STORYLINE_NAV_REPEAT_GUARD_MS)
+		{
+			Log.LogDebug((object)$"[键盘钩子] 故事线按键 0x{vkCode:X2} 防重复，已拦截但不重复处理");
+			return;
+		}
+		_lastSuppressedStorylineNavKey = vkCode;
+		_lastSuppressedStorylineNavUtc = utcNow;
+		_keyWasDown[vkCode] = true;
+		HandleKey(vkCode);
+	}
+
 	private static bool ShouldTrySkipQTEFromSuppressedSpace()
 	{
 		return _lastQTEController != null || (DateTime.UtcNow - _lastQTEStartedUtc).TotalSeconds < 2.0 || IsQTEActive();
@@ -1109,6 +1181,11 @@ public class Plugin : BaseUnityPlugin
 	private static bool IsInArchivePage()
 	{
 		ResolveArchiveTypes();
+		if (IsStartOrMainMenuPageVisible())
+		{
+			Log.LogDebug((object)"[档案] 启动页/主菜单正在显示，忽略后台档案控制器");
+			return false;
+		}
 		object activeArchiveContentController = GetActiveArchiveContentController();
 		if (activeArchiveContentController != null && IsArchiveControllerPageVisible(activeArchiveContentController, "") && HasArchiveContentVisibleText(activeArchiveContentController))
 		{
@@ -1121,6 +1198,46 @@ public class Plugin : BaseUnityPlugin
 		}
 		object activeArchiveHomeController = GetActiveArchiveHomeController();
 		return activeArchiveHomeController != null && IsArchiveControllerPageVisible(activeArchiveHomeController, "archivePageToggle") && GetArchiveHomeItems(activeArchiveHomeController).Length > 0;
+	}
+
+	private static bool IsStartOrMainMenuPageVisible()
+	{
+		try
+		{
+			if (_gameControllerType != null)
+			{
+				object activeObject = GetActiveObject(_gameControllerType);
+				object fieldValue = GetFieldValue(activeObject, "startPageToggleHide");
+				if (IsToggleHideGameObjectActive(fieldValue))
+				{
+					return true;
+				}
+			}
+			Type type2 = Type.GetType("ToggleHide, Assembly-CSharp");
+			if (type2 == null)
+			{
+				return false;
+			}
+			Array array = FindObjectsOfType(type2);
+			if (array == null)
+			{
+				return false;
+			}
+			foreach (object item in array)
+			{
+				object gameObjectFromComponent2 = GetGameObjectFromComponent(item);
+				string text = GetGameObjectName(gameObjectFromComponent2);
+				if (!string.IsNullOrWhiteSpace(text) && (text.IndexOf("StartPage", StringComparison.OrdinalIgnoreCase) >= 0 || text.IndexOf("MainMenu", StringComparison.OrdinalIgnoreCase) >= 0 || text.Equals("Start", StringComparison.OrdinalIgnoreCase)) && IsToggleHideGameObjectActive(item))
+				{
+					return true;
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[档案] 判断启动页/主菜单失败: " + ex.Message));
+		}
+		return false;
 	}
 
 	private static string GetArchiveSignature()
@@ -1775,6 +1892,12 @@ public class Plugin : BaseUnityPlugin
 					list.Add(optionItem);
 				}
 			}
+			OptionItem[] splashStartOptions = GetSplashStartOptions(allVisibleTextsWithPosition);
+			if (splashStartOptions.Length > 0)
+			{
+				Log.LogInfo((object)("[选项过滤] 检测到启动页点击开始，忽略后台按钮: " + splashStartOptions[0].Text));
+				return splashStartOptions;
+			}
 			OptionItem[] confirmationOptions = GetConfirmationDialogOptions(list);
 			if (confirmationOptions.Length >= 2)
 			{
@@ -1939,6 +2062,23 @@ public class Plugin : BaseUnityPlugin
 			}
 		}
 		return false;
+	}
+
+	private static OptionItem[] GetSplashStartOptions(OptionItem[] visibleTexts)
+	{
+		if (visibleTexts == null || visibleTexts.Length == 0)
+		{
+			return new OptionItem[0];
+		}
+		foreach (OptionItem optionItem in visibleTexts)
+		{
+			string text = optionItem?.Text?.Trim();
+			if (text == "点击开始")
+			{
+				return new OptionItem[1] { optionItem };
+			}
+		}
+		return new OptionItem[0];
 	}
 
 	private static OptionItem[] GetSingleStartOptions(OptionItem[] visibleTexts)
@@ -3172,6 +3312,23 @@ public class Plugin : BaseUnityPlugin
 		}
 		PropertyInfo property = component.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
 		return property?.GetValue(component);
+	}
+
+	private static string GetGameObjectName(object gameObject)
+	{
+		if (gameObject == null)
+		{
+			return "";
+		}
+		try
+		{
+			PropertyInfo property = gameObject.GetType().GetProperty("name", BindingFlags.Instance | BindingFlags.Public);
+			return property?.GetValue(gameObject) as string ?? "";
+		}
+		catch
+		{
+			return "";
+		}
 	}
 
 	private static object GetParentGameObject(object componentOrGameObject)
@@ -5211,6 +5368,7 @@ public class Plugin : BaseUnityPlugin
 	private static void ReturnToChapterSelectionFromNodeMode()
 	{
 		_restoreStorylineNodeModeOnOpen = false;
+		_ignoreStorylineCloseUntilUtc = DateTime.UtcNow.AddMilliseconds(STORYLINE_RETURN_CLOSE_GUARD_MS);
 		ClearNodeMode("Return to chapter selection from node mode");
 		ShowStorylineChapterSelectionNative();
 		_currentUIState = UIState.Storyline;
@@ -5924,6 +6082,309 @@ public class Plugin : BaseUnityPlugin
 		return text.Replace("\r", " ").Replace("\n", " ").Trim();
 	}
 
+	private static void ApplyEventValueChangePatches(Harmony harmony)
+	{
+		//IL_0097: Unknown result type (might be due to invalid IL or missing references)
+		//IL_009d: Expected O, but got Unknown
+		if (harmony == null)
+		{
+			return;
+		}
+		Type type = Type.GetType("EventValueChangeNotifier, Assembly-CSharp");
+		if (type == null)
+		{
+			Log.LogWarning((object)"未找到 EventValueChangeNotifier，跳过剧情数值变化通知补丁");
+			return;
+		}
+		MethodInfo method = type.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+			.FirstOrDefault((MethodInfo candidate) => candidate.Name == "ShowNotifications" && candidate.GetParameters().Length == 1);
+		if (method == null)
+		{
+			Log.LogWarning((object)"未找到 EventValueChangeNotifier.ShowNotifications，跳过剧情数值变化通知补丁");
+			return;
+		}
+		HarmonyMethod val = new HarmonyMethod(typeof(Plugin).GetMethod("EventValueChangePostfix", BindingFlags.Static | BindingFlags.NonPublic));
+		harmony.Patch((MethodBase)method, (HarmonyMethod)null, val, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null);
+		Log.LogInfo((object)("找到并补丁剧情数值变化方法: " + method.DeclaringType.Name + "." + method.Name));
+	}
+
+	private static void EventValueChangePostfix(object[] __args)
+	{
+		try
+		{
+			if (__args == null || __args.Length == 0)
+			{
+				return;
+			}
+			List<string> list = new List<string>();
+			foreach (object item in EnumerateObjects(__args[0]))
+			{
+				string text = GetFieldValue(item, "elementKey") as string;
+				int num = GetEventDeltaValue(item);
+				string text2 = FormatEventValueChangeSpeech(text, num);
+				if (!string.IsNullOrWhiteSpace(text2))
+				{
+					list.Add(text2);
+				}
+			}
+			if (list.Count == 0)
+			{
+				return;
+			}
+			string text3 = string.Join("。", list.ToArray());
+			DateTime utcNow = DateTime.UtcNow;
+			if (text3 == _lastEventValueSpeakText && (utcNow - _lastEventValueSpeakUtc).TotalMilliseconds < 1200.0)
+			{
+				return;
+			}
+			_lastEventValueSpeakText = text3;
+			_lastEventValueSpeakUtc = utcNow;
+			_lastSpokenText = text3;
+			TolkHelper.Speak(text3, interrupt: true);
+			ManualLogSource log = Log;
+			if (log != null)
+			{
+				log.LogInfo((object)("[剧情数值] 强制朗读: " + text3));
+			}
+			MarkNeedDetect();
+		}
+		catch (Exception ex)
+		{
+			ManualLogSource log2 = Log;
+			if (log2 != null)
+			{
+				log2.LogWarning((object)("[剧情数值] 朗读失败: " + ex.Message));
+			}
+		}
+	}
+
+	private static int GetEventDeltaValue(object item)
+	{
+		object fieldValue = GetFieldValue(item, "delta");
+		if (fieldValue == null)
+		{
+			return 0;
+		}
+		try
+		{
+			return Convert.ToInt32(fieldValue);
+		}
+		catch
+		{
+			return 0;
+		}
+	}
+
+	private static string FormatEventValueChangeSpeech(string key, int delta)
+	{
+		key = NormalizeSpeechText(key);
+		if (string.IsNullOrWhiteSpace(key) || delta == 0)
+		{
+			return "";
+		}
+		string text = (delta > 0) ? "增加" : "减少";
+		int num = Math.Abs(delta);
+		if (key.Contains("金钱") || key.Contains("钱"))
+		{
+			return key + text + " " + num + " 元";
+		}
+		return key + text + " " + num;
+	}
+
+	private static void ApplyStoryContinuePatches(Harmony harmony)
+	{
+		//IL_0097: Unknown result type (might be due to invalid IL or missing references)
+		//IL_009d: Expected O, but got Unknown
+		if (harmony == null)
+		{
+			return;
+		}
+		Type type = Type.GetType("GameController, Assembly-CSharp");
+		if (type == null)
+		{
+			Log.LogWarning((object)"未找到 GameController，跳过剧情继续按钮补丁");
+			return;
+		}
+		MethodInfo method = type.GetMethod("ShowNextNodeButton", BindingFlags.Instance | BindingFlags.NonPublic);
+		if (method == null)
+		{
+			Log.LogWarning((object)"未找到 GameController.ShowNextNodeButton，跳过剧情继续按钮补丁");
+			return;
+		}
+		HarmonyMethod val = new HarmonyMethod(typeof(Plugin).GetMethod("ShowNextNodeButtonPrefix", BindingFlags.Static | BindingFlags.NonPublic));
+		harmony.Patch((MethodBase)method, val, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null);
+		Log.LogInfo((object)"找到并补丁 GameController.ShowNextNodeButton");
+	}
+
+	private static bool ShowNextNodeButtonPrefix(object __instance)
+	{
+		try
+		{
+			if (TryAutoAdvanceStoryContinue(__instance, "[剧情继续] 拦截继续按钮并自动进入下一节点"))
+			{
+				return false;
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogWarning((object)("[剧情继续] ShowNextNodeButton 前置补丁失败: " + ex.Message));
+		}
+		return true;
+	}
+
+	private static void CheckStoryContinueAutomation()
+	{
+		try
+		{
+			DateTime utcNow = DateTime.UtcNow;
+			if ((utcNow - _lastStoryContinueCheckUtc).TotalMilliseconds < 300.0)
+			{
+				return;
+			}
+			_lastStoryContinueCheckUtc = utcNow;
+			if (!IsSafeForStoryContinueAutomation())
+			{
+				return;
+			}
+			if (_gameControllerType == null)
+			{
+				return;
+			}
+			object activeObject = GetActiveObject(_gameControllerType);
+			if (activeObject != null)
+			{
+				TryAutoAdvanceStoryContinue(activeObject, "[剧情继续] 检测到循环剧情已完成，自动进入下一节点");
+			}
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[剧情继续] 自动检测失败: " + ex.Message));
+		}
+	}
+
+	private static bool TryAutoAdvanceStoryContinue(object gameController, string successLog)
+	{
+		if (gameController == null)
+		{
+			return false;
+		}
+		if (!IsSafeForStoryContinueAutomation())
+		{
+			return false;
+		}
+		object fieldValue = GetFieldValue(gameController, "currentNode");
+		if (!IsCompletedRevisitableContinueNode(gameController, fieldValue, out var targetNode))
+		{
+			return false;
+		}
+		string gameNodeId = GetGameNodeId(fieldValue);
+		DateTime utcNow = DateTime.UtcNow;
+		if (gameNodeId == _lastStoryContinueNodeId && (utcNow - _lastStoryContinueActivateUtc).TotalMilliseconds < 1500.0)
+		{
+			return false;
+		}
+		_lastStoryContinueNodeId = gameNodeId;
+		_lastStoryContinueActivateUtc = utcNow;
+		if (ActivateGameNode(gameController, targetNode, successLog + ": " + gameNodeId + " -> " + GetGameNodeId(targetNode)))
+		{
+			ClearCurrentOptionsAfterTransientClick("auto story continue");
+			MarkNeedDetect();
+			return true;
+		}
+		return false;
+	}
+
+	private static bool IsSafeForStoryContinueAutomation()
+	{
+		try
+		{
+			if (_currentUIState == UIState.Settings || _currentUIState == UIState.Archive || _currentUIState == UIState.Storyline || _currentUIState == UIState.QTE)
+			{
+				return false;
+			}
+			if (IsQTEActive() || IsInSettingsPage() || IsInArchivePage() || IsInStorylinePage() || IsStartOrMainMenuPageVisible())
+			{
+				return false;
+			}
+			OptionItem[] endingPageOptions = GetEndingPageOptions();
+			return endingPageOptions == null || endingPageOptions.Length == 0;
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
+	private static bool IsCompletedRevisitableContinueNode(object gameController, object currentNode, out object targetNode)
+	{
+		targetNode = null;
+		if (gameController == null || currentNode == null)
+		{
+			return false;
+		}
+		string text = GetFieldValue(currentNode, "nodeType")?.ToString() ?? "";
+		if (!text.Equals("RevisitableOptionNode", StringComparison.OrdinalIgnoreCase))
+		{
+			return false;
+		}
+		targetNode = GetFieldValue(currentNode, "nextNodeAfterAllOptions");
+		if (targetNode == null)
+		{
+			return false;
+		}
+		return IsRevisitableOptionCompleteByState(gameController, currentNode);
+	}
+
+	private static bool IsRevisitableOptionCompleteByState(object gameController, object node)
+	{
+		try
+		{
+			object fieldValue = GetFieldValue(node, "options");
+			List<object> list = EnumerateObjects(fieldValue).Where((object option) => option != null).ToList();
+			if (list.Count == 0)
+			{
+				return false;
+			}
+			string gameNodeId = GetGameNodeId(node);
+			bool[] revisitableVisitedArray = GetRevisitableVisitedArray(GetFieldValue(gameController, "revisitableOptionStates"), gameNodeId);
+			if (revisitableVisitedArray == null || revisitableVisitedArray.Length == 0)
+			{
+				return false;
+			}
+			int num = 0;
+			for (int i = 0; i < Math.Min(revisitableVisitedArray.Length, list.Count); i++)
+			{
+				if (revisitableVisitedArray[i])
+				{
+					num++;
+				}
+			}
+			int num2 = 0;
+			object fieldValue2 = GetFieldValue(node, "requiredVisitedOptionCountBeforeNext");
+			if (fieldValue2 != null)
+			{
+				try
+				{
+					num2 = Convert.ToInt32(fieldValue2);
+				}
+				catch
+				{
+					num2 = 0;
+				}
+			}
+			if (num2 <= 0 || num2 > list.Count)
+			{
+				num2 = list.Count;
+			}
+			return num >= num2;
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[剧情继续] 判断循环节点完成状态失败: " + ex.Message));
+			return false;
+		}
+	}
+
 	private static void ApplyQTEPatches(Harmony harmony)
 	{
 		//IL_00a1: Unknown result type (might be due to invalid IL or missing references)
@@ -5992,6 +6453,11 @@ public class Plugin : BaseUnityPlugin
 				{
 					continue;
 				}
+				if (IsGameControllerTriggerArea(item))
+				{
+					Log.LogDebug((object)"[探索] 跳过剧情全屏继续触发区，避免朗读继续按钮");
+					continue;
+				}
 				OptionItem optionItem = new OptionItem();
 				optionItem.Text = (list.Count == 0) ? "继续" : ("探索交互点 " + (list.Count + 1));
 				optionItem.ClickableComponent = item;
@@ -6017,6 +6483,38 @@ public class Plugin : BaseUnityPlugin
 		{
 			Log.LogDebug((object)("[探索] 自动检测交互点失败: " + ex.Message));
 			return new OptionItem[0];
+		}
+	}
+
+	private static bool IsGameControllerTriggerArea(object component)
+	{
+		if (component == null)
+		{
+			return false;
+		}
+		try
+		{
+			if (_triggerAreaType != null && !_triggerAreaType.IsInstanceOfType(component))
+			{
+				return false;
+			}
+			if (_gameControllerType == null)
+			{
+				return false;
+			}
+			object activeObject = GetActiveObject(_gameControllerType);
+			object obj = GetFieldValue(activeObject, "triggerArea");
+			if (obj == null)
+			{
+				return false;
+			}
+			object gameObjectFromComponent = GetGameObjectFromComponent(component);
+			return gameObjectFromComponent != null && object.ReferenceEquals(gameObjectFromComponent, obj);
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[探索] 判断剧情触发区失败: " + ex.Message));
+			return false;
 		}
 	}
 
@@ -6524,13 +7022,14 @@ public class Plugin : BaseUnityPlugin
 					}
 					return new IntPtr(1);
 				}
-				if (ShouldSuppressHandledKeyForGame(num))
+				if (ShouldSuppressStorylineNavigationKeyForGame(num))
 				{
 					ManualLogSource log8 = Log;
 					if (log8 != null)
 					{
-						log8.LogDebug((object)$"[键盘钩子] 拦截插件已接管按键 0x{num:X2}");
+						log8.LogInfo((object)$"[键盘钩子] 拦截故事线导航键 0x{num:X2}，避免游戏原生返回同时触发");
 					}
+					HandleSuppressedStorylineNavigationKey(num);
 					return new IntPtr(1);
 				}
 				return CallNextHookEx(_hookId, nCode, wParam, lParam);
@@ -6545,23 +7044,6 @@ public class Plugin : BaseUnityPlugin
 			}
 		}
 		return CallNextHookEx(_hookId, nCode, wParam, lParam);
-	}
-
-	private static bool ShouldSuppressHandledKeyForGame(int vkCode)
-	{
-		if (vkCode == VK_SPACE)
-		{
-			return false;
-		}
-		if (IsModifierKey(vkCode) || IsModifierKeyDown())
-		{
-			return false;
-		}
-		if (!ShouldPollHandleKey(vkCode))
-		{
-			return false;
-		}
-		return vkCode == VK_ESCAPE || vkCode == VK_BACK || vkCode == VK_RETURN || vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT || vkCode == VK_F3 || vkCode == VK_F5 || vkCode == VK_F6 || vkCode == VK_F11 || vkCode == VK_D || IsDigitShortcut(vkCode);
 	}
 
 	private static void HandleKey(int vkCode)
@@ -6676,6 +7158,11 @@ public class Plugin : BaseUnityPlugin
 				if (_inNodeMode)
 				{
 					ReturnToChapterSelectionFromNodeMode();
+					_suppressCurrentKey = true;
+				}
+				else if (_currentUIState == UIState.Storyline && DateTime.UtcNow < _ignoreStorylineCloseUntilUtc)
+				{
+					Log.LogInfo((object)"[故事线] 刚从节点返回章节列表，忽略本次关闭故事线请求");
 					_suppressCurrentKey = true;
 				}
 				else if (_currentUIState == UIState.Storyline)
@@ -8155,6 +8642,11 @@ public class Plugin : BaseUnityPlugin
 		if (log2 != null)
 		{
 			log2.LogInfo((object)$"其中 {num} 个是可点击组件");
+			for (int j = 0; j < options.Length; j++)
+			{
+				OptionItem optionItem = options[j];
+				log2.LogInfo((object)$"[选项列表] {j + 1}/{options.Length}: {optionItem?.Text}, clickable={optionItem?.ClickableComponent != null}, pos=({optionItem?.ScreenX ?? 0f:F1},{optionItem?.ScreenY ?? 0f:F1}), hasPos={optionItem?.HasScreenPosition ?? false}");
+			}
 		}
 		SpeakCurrentOption();
 		LogInputState("SetOptions done");
@@ -8229,6 +8721,11 @@ public class Plugin : BaseUnityPlugin
 
 	public static void RequestSpeak(string text)
 	{
+		RequestSpeakFromTextComponent(null, text);
+	}
+
+	public static void RequestSpeakFromTextComponent(object textComponent, string text)
+	{
 		if (string.IsNullOrWhiteSpace(text))
 		{
 			return;
@@ -8259,6 +8756,14 @@ public class Plugin : BaseUnityPlugin
 			MarkNeedDetect();
 			return;
 		}
+		bool flag = IsSubtitleTextComponent(textComponent);
+		bool flag2 = IsNarrationTextComponent(textComponent);
+		if (!flag && !flag2)
+		{
+			Log?.LogDebug((object)("[自动朗读] 跳过非字幕/旁白文本: " + text));
+			MarkNeedDetect();
+			return;
+		}
 		if (!_subtitleSpeakEnabled)
 		{
 			ManualLogSource log2 = Log;
@@ -8277,6 +8782,16 @@ public class Plugin : BaseUnityPlugin
 			log3.LogDebug((object)("朗读: " + text));
 		}
 		MarkNeedDetect();
+	}
+
+	private static bool IsSubtitleTextComponent(object textComponent)
+	{
+		if (textComponent == null)
+		{
+			return false;
+		}
+		ResolveSubtitleTypes();
+		return _subtitleTextComponent != null && object.ReferenceEquals(textComponent, _subtitleTextComponent);
 	}
 
 	private static bool IsPriorityStatusText(string text)

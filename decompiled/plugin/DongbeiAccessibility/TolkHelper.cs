@@ -260,6 +260,7 @@ public static class TolkHelper
 		{
 			return;
 		}
+		Plugin.Log?.LogInfo((object)("[朗读] " + text));
 		IntPtr intPtr = IntPtr.Zero;
 		try
 		{

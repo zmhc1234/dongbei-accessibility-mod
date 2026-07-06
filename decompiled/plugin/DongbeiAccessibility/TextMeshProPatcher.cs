@@ -95,7 +95,7 @@ public static class TextMeshProPatcher
 		{
 			if (!string.IsNullOrEmpty(value))
 			{
-				Plugin.RequestSpeak(value);
+				Plugin.RequestSpeakFromTextComponent(__instance, value);
 				Plugin.MarkNeedDetect();
 			}
 		}
