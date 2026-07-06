@@ -1,6 +1,6 @@
-﻿using System;
+using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -31,6 +31,17 @@ public class Plugin : BaseUnityPlugin
 	private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
 	private delegate void TimerProc(IntPtr hWnd, uint uMsg, IntPtr nIDEvent, uint dwTime);
+
+	private sealed class RevisitableNodeLink
+	{
+		public string ParentNodeId;
+
+		public object ParentNode;
+
+		public object ContinueNode;
+
+		public int OptionIndex;
+	}
 
 	internal static ManualLogSource Log;
 
@@ -80,19 +91,9 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool _restoreStorylineNodeModeOnOpen;
 
-	private static DateTime _ignoreStorylineCloseUntilUtc = DateTime.MinValue;
-
-	private static DateTime _lastSuppressedStorylineNavUtc = DateTime.MinValue;
-
-	private static int _lastSuppressedStorylineNavKey = 0;
-
 	private static int _storylineMissCount = 0;
 
 	private const int STORYLINE_MISS_THRESHOLD = 3;
-
-	private const int STORYLINE_RETURN_CLOSE_GUARD_MS = 250;
-
-	private const int STORYLINE_NAV_REPEAT_GUARD_MS = 250;
 
 	private static int _optionsMissCount = 0;
 
@@ -131,16 +132,6 @@ public class Plugin : BaseUnityPlugin
 	private static bool _narrationTypesResolved = false;
 
 	private static string _lastNarrationSpeakText = "";
-
-	private static DateTime _lastEventValueSpeakUtc = DateTime.MinValue;
-
-	private static string _lastEventValueSpeakText = "";
-
-	private static DateTime _lastStoryContinueCheckUtc = DateTime.MinValue;
-
-	private static DateTime _lastStoryContinueActivateUtc = DateTime.MinValue;
-
-	private static string _lastStoryContinueNodeId = "";
 
 	private static UIState _currentUIState = UIState.Unknown;
 
@@ -218,15 +209,22 @@ public class Plugin : BaseUnityPlugin
 
 	private static readonly int[] POLLED_KEYS = new int[22]
 	{
-		VK_F3, VK_F5, VK_F6, VK_F11, VK_D, VK_RETURN, VK_ESCAPE, VK_BACK, VK_UP, VK_DOWN,
-		VK_LEFT, VK_RIGHT, VK_SPACE, 49, 50, 51, 52, 53, 54, 55,
+		114, 116, 117, 122, 68, 13, 27, 8, 38, 40,
+		37, 39, 32, 49, 50, 51, 52, 53, 54, 55,
 		56, 57
 	};
 
 	private static readonly Dictionary<int, bool> _keyWasDown = new Dictionary<int, bool>();
 
 	private static readonly Dictionary<int, DateTime> _nextRepeatTimeUtc = new Dictionary<int, DateTime>();
+
 	private static readonly Dictionary<string, object> _gameNodeCache = new Dictionary<string, object>();
+
+	private static readonly Dictionary<string, RevisitableNodeLink> _revisitableChildLinks = new Dictionary<string, RevisitableNodeLink>(StringComparer.Ordinal);
+
+	private static readonly HashSet<string> _revisitableContinueNodeIds = new HashSet<string>(StringComparer.Ordinal);
+
+	private static bool _revisitableLinkCacheBuilt;
 
 	private const int KEY_REPEAT_INITIAL_DELAY_MS = 350;
 
@@ -363,17 +361,17 @@ public class Plugin : BaseUnityPlugin
 
 	private void Awake()
 	{
-		//IL_00f3: Unknown result type (might be due to invalid IL or missing references)
-		//IL_00fd: Expected O, but got Unknown
+		//IL_00e6: Unknown result type (might be due to invalid IL or missing references)
+		//IL_00f0: Expected O, but got Unknown
 		Instance = this;
-		Log = Logger;
+		Log = ((BaseUnityPlugin)this).Logger;
 		Log.LogInfo((object)"========== 插件 东北往事 无障碍插件 v1.0.0 正在加载... ==========");
 		Log.LogInfo((object)"[诊断] Awake 被调用，插件对象创建成功");
 		try
 		{
 			ManualLogSource log = Log;
 			GameObject gameObject = ((Component)this).gameObject;
-			log.LogInfo((object)("[诊断] 插件对象名称: " + ((gameObject != null) ? ((UnityEngine.Object)gameObject).name : null)));
+			log.LogInfo((object)("[诊断] 插件对象名称: " + (((Object)(object)gameObject != (Object)null) ? ((Object)gameObject).name : null)));
 		}
 		catch
 		{
@@ -406,50 +404,30 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			ApplyEventValueChangePatches(_harmony);
-			Log.LogInfo((object)"剧情数值变化通知补丁已应用");
+			Log.LogInfo((object)"QTE 自动跳过补丁已应用");
 		}
 		catch (Exception ex2)
 		{
-			Log.LogError((object)("应用剧情数值变化通知补丁失败: " + ex2.GetType().Name + " - " + ex2.Message));
+			Log.LogError((object)("应用 QTE 补丁失败: " + ex2.GetType().Name + " - " + ex2.Message));
 			Log.LogError((object)("堆栈跟踪: " + ex2.StackTrace));
-		}
-		try
-		{
-			ApplyStoryContinuePatches(_harmony);
-			Log.LogInfo((object)"剧情继续按钮自动处理补丁已应用");
-		}
-		catch (Exception ex3)
-		{
-			Log.LogError((object)("应用剧情继续按钮补丁失败: " + ex3.GetType().Name + " - " + ex3.Message));
-			Log.LogError((object)("堆栈跟踪: " + ex3.StackTrace));
-		}
-		try
-		{
-			Log.LogInfo((object)"QTE 自动跳过补丁已应用");
-		}
-		catch (Exception ex4)
-		{
-			Log.LogError((object)("应用 QTE 补丁失败: " + ex4.GetType().Name + " - " + ex4.Message));
-			Log.LogError((object)("堆栈跟踪: " + ex4.StackTrace));
 		}
 		try
 		{
 			InstallKeyboardHook();
 			Log.LogInfo((object)"系统键盘钩子仅用于 QTE 空格拦截，其他按键继续由轮询处理");
 		}
-		catch (Exception ex5)
+		catch (Exception ex3)
 		{
-			Log.LogError((object)("安装键盘钩子失败: " + ex5.GetType().Name + " - " + ex5.Message));
-			Log.LogError((object)("堆栈跟踪: " + ex5.StackTrace));
+			Log.LogError((object)("安装键盘钩子失败: " + ex3.GetType().Name + " - " + ex3.Message));
+			Log.LogError((object)("堆栈跟踪: " + ex3.StackTrace));
 		}
 		try
 		{
 			StartAutoDetectTimer();
 		}
-		catch (Exception ex6)
+		catch (Exception ex4)
 		{
-			Log.LogError((object)("启动自动检测定时器失败: " + ex6.GetType().Name + " - " + ex6.Message));
+			Log.LogError((object)("启动自动检测定时器失败: " + ex4.GetType().Name + " - " + ex4.Message));
 		}
 		Log.LogInfo((object)"插件加载完成！");
 		Log.LogInfo((object)"提示：全自动模式已启用，自动识别界面，上下左右切换选项，回车确认");
@@ -527,7 +505,7 @@ public class Plugin : BaseUnityPlugin
 			if (log3 != null)
 			{
 				GameObject gameObject = ((Component)this).gameObject;
-				log3.LogInfo((object)$"[诊断] 对象是否激活: {((gameObject != null) ? new bool?(gameObject.activeSelf) : ((bool?)null))}");
+				log3.LogInfo((object)$"[诊断] 对象是否激活: {(((Object)(object)gameObject != (Object)null) ? new bool?(gameObject.activeSelf) : null)}");
 			}
 		}
 		catch
@@ -572,60 +550,59 @@ public class Plugin : BaseUnityPlugin
 				if (_harmony != null)
 				{
 					_harmony.UnpatchSelf();
-					ManualLogSource log13 = Log;
-					if (log13 != null)
+					ManualLogSource log9 = Log;
+					if (log9 != null)
 					{
-						log13.LogInfo((object)"Harmony 补丁已卸载");
+						log9.LogInfo((object)"Harmony 补丁已卸载");
 					}
 				}
 			}
-			catch (Exception ex4)
+			catch (Exception ex2)
 			{
-				ManualLogSource log14 = Log;
-				if (log14 != null)
+				ManualLogSource log10 = Log;
+				if (log10 != null)
 				{
-					log14.LogError((object)("卸载 Harmony 补丁失败: " + ex4.Message));
+					log10.LogError((object)("卸载 Harmony 补丁失败: " + ex2.Message));
 				}
 			}
 			try
 			{
 				TolkHelper.Unload();
-				ManualLogSource log15 = Log;
-				if (log15 != null)
+				ManualLogSource log11 = Log;
+				if (log11 != null)
 				{
-					log15.LogInfo((object)"Tolk 已关闭");
+					log11.LogInfo((object)"Tolk 已关闭");
 				}
 			}
-			catch (Exception ex5)
+			catch (Exception ex3)
 			{
-				ManualLogSource log16 = Log;
-				if (log16 != null)
+				ManualLogSource log12 = Log;
+				if (log12 != null)
 				{
-					log16.LogError((object)("关闭 Tolk 失败: " + ex5.Message));
+					log12.LogError((object)("关闭 Tolk 失败: " + ex3.Message));
 				}
 			}
-			ManualLogSource log17 = Log;
-			if (log17 != null)
+			ManualLogSource log13 = Log;
+			if (log13 != null)
 			{
-				log17.LogInfo((object)"插件清理完成！");
+				log13.LogInfo((object)"插件清理完成！");
 			}
+			Instance = null;
+			_pluginInitialized = false;
 		}
 		else
 		{
-			ManualLogSource log18 = Log;
-			if (log18 != null)
+			ManualLogSource log14 = Log;
+			if (log14 != null)
 			{
-				log18.LogInfo((object)"[修复] 对象被意外销毁，但插件功能继续运行！不执行清理");
+				log14.LogInfo((object)"[修复] 对象被意外销毁，但插件功能继续运行！不执行清理");
 			}
-			ManualLogSource log19 = Log;
-			if (log19 != null)
+			ManualLogSource log15 = Log;
+			if (log15 != null)
 			{
-				log19.LogInfo((object)"[修复] 键盘钩子、定时器、Harmony补丁将继续工作");
+				log15.LogInfo((object)"[修复] 键盘钩子、定时器、Harmony补丁将继续工作");
 			}
-			return;
 		}
-		Instance = null;
-		_pluginInitialized = false;
 	}
 
 	private static void StopNativeInputHandlers()
@@ -678,9 +655,9 @@ public class Plugin : BaseUnityPlugin
 	{
 		if (!(_timerId != IntPtr.Zero))
 		{
-			Log.LogInfo((object)$"启动自动检测定时器，间隔 {INPUT_POLL_INTERVAL} 毫秒");
+			Log.LogInfo((object)$"启动自动检测定时器，间隔 {60u} 毫秒");
 			TimerProc lpTimerFunc = AutoDetectTimerProc;
-			_timerId = SetTimer(IntPtr.Zero, IntPtr.Zero, INPUT_POLL_INTERVAL, lpTimerFunc);
+			_timerId = SetTimer(IntPtr.Zero, IntPtr.Zero, 60u, lpTimerFunc);
 			if (_timerId != IntPtr.Zero)
 			{
 				Log.LogInfo((object)"自动检测定时器启动成功");
@@ -703,7 +680,6 @@ public class Plugin : BaseUnityPlugin
 			if (IsGameWindowActive())
 			{
 				PollKeyboardInput();
-				CheckStoryContinueAutomation();
 				if (_needDetect)
 				{
 					CheckNarrationSpeak();
@@ -754,33 +730,27 @@ public class Plugin : BaseUnityPlugin
 				bool flag3 = !flag2;
 				if (!flag3 && IsRepeatablePolledKey(num))
 				{
-					DateTime value;
-					if (!_nextRepeatTimeUtc.TryGetValue(num, out value))
+					if (!_nextRepeatTimeUtc.TryGetValue(num, out var value))
 					{
-						value = utcNow.AddMilliseconds(KEY_REPEAT_INITIAL_DELAY_MS);
+						value = utcNow.AddMilliseconds(350.0);
 						_nextRepeatTimeUtc[num] = value;
 					}
 					if (utcNow >= value)
 					{
 						flag3 = true;
-						_nextRepeatTimeUtc[num] = utcNow.AddMilliseconds(KEY_REPEAT_INTERVAL_MS);
+						_nextRepeatTimeUtc[num] = utcNow.AddMilliseconds(120.0);
 					}
 				}
-				if (!flag3)
+				if (flag3 && ShouldPollHandleKey(num))
 				{
-					continue;
+					if (!flag2 && IsRepeatablePolledKey(num))
+					{
+						_nextRepeatTimeUtc[num] = utcNow.AddMilliseconds(350.0);
+					}
+					_suppressCurrentKey = false;
+					HandleKey(num);
+					_suppressCurrentKey = false;
 				}
-				if (!ShouldPollHandleKey(num))
-				{
-					continue;
-				}
-				if (!flag2 && IsRepeatablePolledKey(num))
-				{
-					_nextRepeatTimeUtc[num] = utcNow.AddMilliseconds(KEY_REPEAT_INITIAL_DELAY_MS);
-				}
-				_suppressCurrentKey = false;
-				HandleKey(num);
-				_suppressCurrentKey = false;
 			}
 		}
 		catch (Exception ex)
@@ -807,40 +777,67 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool IsRepeatablePolledKey(int vkCode)
 	{
-		return vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT;
+		if (vkCode != 38 && vkCode != 40 && vkCode != 37)
+		{
+			return vkCode == 39;
+		}
+		return true;
 	}
 
 	private static bool ShouldPollHandleKey(int vkCode)
 	{
-		if (vkCode == VK_F5 || vkCode == VK_F6 || vkCode == VK_F11 || vkCode == VK_D)
+		switch (vkCode)
 		{
+		case 68:
+		case 116:
+		case 117:
+		case 122:
 			return true;
-		}
-		if (vkCode == VK_SPACE)
-		{
+		case 32:
 			return IsQTEInputActive();
+		default:
+			if (IsDigitShortcut(vkCode))
+			{
+				if (_inOptionsMode && _options.Length != 0)
+				{
+					return AreCurrentOptionsFromGameController();
+				}
+				return false;
+			}
+			switch (vkCode)
+			{
+			case 13:
+				if ((!_inOptionsMode || _options.Length == 0) && (!_inSettingsMode || _settings.Length == 0) && (!_inNodeMode || _storylineNodes.Length == 0))
+				{
+					if (_inArchiveMode)
+					{
+						return _archiveItems.Length != 0;
+					}
+					return false;
+				}
+				return true;
+			case 8:
+			case 27:
+				if (!_inSettingsMode && !_inNodeMode && _currentUIState != UIState.Storyline && !_inArchiveMode)
+				{
+					return _currentUIState == UIState.Archive;
+				}
+				return true;
+			case 37:
+			case 38:
+			case 39:
+			case 40:
+				if ((!_inOptionsMode || _options.Length <= 1) && (!_inSettingsMode || _settings.Length == 0) && (!_inNodeMode || _storylineNodes.Length <= 1) && !_inArchiveMode)
+				{
+					return _currentUIState == UIState.Archive;
+				}
+				return true;
+			case 114:
+				return _currentUIState == UIState.Storyline;
+			default:
+				return false;
+			}
 		}
-		if (IsDigitShortcut(vkCode))
-		{
-			return _inOptionsMode && _options.Length > 0 && AreCurrentOptionsFromGameController();
-		}
-		if (vkCode == VK_RETURN)
-		{
-			return (_inOptionsMode && _options.Length > 0) || (_inSettingsMode && _settings.Length > 0) || (_inNodeMode && _storylineNodes.Length > 0) || (_inArchiveMode && _archiveItems.Length > 0);
-		}
-		if (vkCode == VK_ESCAPE || vkCode == VK_BACK)
-		{
-			return _inSettingsMode || _inNodeMode || _currentUIState == UIState.Storyline || _inArchiveMode || _currentUIState == UIState.Archive;
-		}
-		if (vkCode == VK_UP || vkCode == VK_DOWN || vkCode == VK_LEFT || vkCode == VK_RIGHT)
-		{
-			return (_inOptionsMode && _options.Length > 1) || (_inSettingsMode && _settings.Length > 0) || (_inNodeMode && _storylineNodes.Length > 1) || _inArchiveMode || _currentUIState == UIState.Archive;
-		}
-		if (vkCode == VK_F3)
-		{
-			return _currentUIState == UIState.Storyline;
-		}
-		return false;
 	}
 
 	private static void DetectUIState()
@@ -868,7 +865,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				OptionItem[] clickableOptions = GetClickableOptions();
 				LogInputState("DetectUIState settings ignored; candidates=" + ((clickableOptions != null) ? clickableOptions.Length.ToString() : "null"));
-				if (clickableOptions != null && clickableOptions.Length > 0)
+				if (clickableOptions != null && clickableOptions.Length != 0)
 				{
 					uIState = UIState.Options;
 					text = GetOptionsSignature(clickableOptions);
@@ -897,37 +894,40 @@ public class Plugin : BaseUnityPlugin
 			}
 			else
 			{
-				OptionItem[] endingOptions = GetEndingPageOptions();
-				if (endingOptions != null && endingOptions.Length > 0)
+				OptionItem[] endingPageOptions = GetEndingPageOptions();
+				if (endingPageOptions != null && endingPageOptions.Length != 0)
 				{
 					uIState = UIState.Options;
-					text = GetOptionsSignature(endingOptions);
-					LogInputState("DetectUIState ending options=" + endingOptions.Length);
-					goto DetectionComplete;
-				}
-				OptionItem[] clickableOptions = GetClickableOptions();
-				LogInputState("DetectUIState candidates=" + ((clickableOptions != null) ? clickableOptions.Length.ToString() : "null"));
-				if (clickableOptions != null && clickableOptions.Length > 0)
-				{
-					uIState = UIState.Options;
-					text = GetOptionsSignature(clickableOptions);
+					text = GetOptionsSignature(endingPageOptions);
+					LogInputState("DetectUIState ending options=" + endingPageOptions.Length);
 				}
 				else
 				{
-					OptionItem[] exploreOptions = GetExploreInteractionOptions();
-					if (exploreOptions != null && exploreOptions.Length > 0)
+					OptionItem[] clickableOptions2 = GetClickableOptions();
+					LogInputState("DetectUIState candidates=" + ((clickableOptions2 != null) ? clickableOptions2.Length.ToString() : "null"));
+					if (clickableOptions2 != null && clickableOptions2.Length != 0)
 					{
 						uIState = UIState.Options;
-						text = GetOptionsSignature(exploreOptions);
-						LogInputState("DetectUIState explore options=" + exploreOptions.Length);
-						goto DetectionComplete;
+						text = GetOptionsSignature(clickableOptions2);
 					}
-					uIState = UIState.Dialogue;
-					text = "dialogue";
+					else
+					{
+						OptionItem[] exploreInteractionOptions = GetExploreInteractionOptions();
+						if (exploreInteractionOptions != null && exploreInteractionOptions.Length != 0)
+						{
+							uIState = UIState.Options;
+							text = GetOptionsSignature(exploreInteractionOptions);
+							LogInputState("DetectUIState explore options=" + exploreInteractionOptions.Length);
+						}
+						else
+						{
+							uIState = UIState.Dialogue;
+							text = "dialogue";
+						}
+					}
 				}
 			}
-			DetectionComplete:
-			LogInputState("DetectUIState raw=" + uIState + ", signature=" + text);
+			LogInputState("DetectUIState raw=" + uIState.ToString() + ", signature=" + text);
 			if (_currentUIState == UIState.Storyline && uIState != UIState.Storyline)
 			{
 				if (uIState == UIState.Options || uIState == UIState.Settings || uIState == UIState.QTE || uIState == UIState.Archive || uIState == UIState.Dialogue)
@@ -968,18 +968,18 @@ public class Plugin : BaseUnityPlugin
 				}
 				else
 				{
-				_optionsMissCount++;
-				Log.LogInfo((object)$"[防抖] 选项检测失败，连续失败次数: {_optionsMissCount}/{3}");
-				if (_optionsMissCount < 3)
-				{
-					Log.LogInfo((object)"[防抖] 未达到阈值，保持选项状态");
-					uIState = UIState.Options;
-					text = _lastDetectedSignature;
-				}
-				else
-				{
-					Log.LogInfo((object)"[防抖] 达到阈值，切换到新状态");
-				}
+					_optionsMissCount++;
+					Log.LogInfo((object)$"[防抖] 选项检测失败，连续失败次数: {_optionsMissCount}/{3}");
+					if (_optionsMissCount < 3)
+					{
+						Log.LogInfo((object)"[防抖] 未达到阈值，保持选项状态");
+						uIState = UIState.Options;
+						text = _lastDetectedSignature;
+					}
+					else
+					{
+						Log.LogInfo((object)"[防抖] 达到阈值，切换到新状态");
+					}
 				}
 			}
 			else if (uIState == UIState.Options && _optionsMissCount > 0)
@@ -1106,54 +1106,30 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool ShouldSuppressSpaceForQTE()
 	{
-		return DateTime.UtcNow < _suppressSpaceUntilUtc || IsQTEInputActive();
-	}
-
-	private static bool ShouldSuppressStorylineNavigationKeyForGame(int vkCode)
-	{
-		if (IsModifierKeyDown())
+		if (!(DateTime.UtcNow < _suppressSpaceUntilUtc))
 		{
-			return false;
+			return IsQTEInputActive();
 		}
-		if (vkCode == VK_ESCAPE)
-		{
-			return _inNodeMode || _currentUIState == UIState.Storyline;
-		}
-		if (vkCode == VK_BACK)
-		{
-			return _inNodeMode || _currentUIState == UIState.Storyline;
-		}
-		return false;
-	}
-
-	private static void HandleSuppressedStorylineNavigationKey(int vkCode)
-	{
-		DateTime utcNow = DateTime.UtcNow;
-		if (vkCode == _lastSuppressedStorylineNavKey && (utcNow - _lastSuppressedStorylineNavUtc).TotalMilliseconds < STORYLINE_NAV_REPEAT_GUARD_MS)
-		{
-			Log.LogDebug((object)$"[键盘钩子] 故事线按键 0x{vkCode:X2} 防重复，已拦截但不重复处理");
-			return;
-		}
-		_lastSuppressedStorylineNavKey = vkCode;
-		_lastSuppressedStorylineNavUtc = utcNow;
-		_keyWasDown[vkCode] = true;
-		HandleKey(vkCode);
+		return true;
 	}
 
 	private static bool ShouldTrySkipQTEFromSuppressedSpace()
 	{
-		return _lastQTEController != null || (DateTime.UtcNow - _lastQTEStartedUtc).TotalSeconds < 2.0 || IsQTEActive();
+		if (_lastQTEController == null && !((DateTime.UtcNow - _lastQTEStartedUtc).TotalSeconds < 2.0))
+		{
+			return IsQTEActive();
+		}
+		return true;
 	}
 
 	private static void TrySkipQTEFromSpace()
 	{
 		DateTime utcNow = DateTime.UtcNow;
-		if ((utcNow - _lastQTESkipAttemptUtc).TotalMilliseconds < 300.0)
+		if (!((utcNow - _lastQTESkipAttemptUtc).TotalMilliseconds < 300.0))
 		{
-			return;
+			_lastQTESkipAttemptUtc = utcNow;
+			SkipCurrentQTE();
 		}
-		_lastQTESkipAttemptUtc = utcNow;
-		SkipCurrentQTE();
 	}
 
 	private static void ResolveArchiveTypes()
@@ -1170,7 +1146,7 @@ public class Plugin : BaseUnityPlugin
 			_archiveContentPageControllerType = Type.GetType("ArchiveContentPageController, Assembly-CSharp");
 			_characterCardType = Type.GetType("CharacterCard, Assembly-CSharp");
 			_archiveListItemType = Type.GetType("ArchiveListItem, Assembly-CSharp");
-			Log.LogInfo((object)($"档案类型解析: home={_archiveHomePageControllerType != null}, detail={_characterDetailPageControllerType != null}, content={_archiveContentPageControllerType != null}, card={_characterCardType != null}, item={_archiveListItemType != null}"));
+			Log.LogInfo((object)$"档案类型解析: home={_archiveHomePageControllerType != null}, detail={_characterDetailPageControllerType != null}, content={_archiveContentPageControllerType != null}, card={_characterCardType != null}, item={_archiveListItemType != null}");
 		}
 		catch (Exception ex)
 		{
@@ -1181,61 +1157,20 @@ public class Plugin : BaseUnityPlugin
 	private static bool IsInArchivePage()
 	{
 		ResolveArchiveTypes();
-		if (IsStartOrMainMenuPageVisible())
-		{
-			Log.LogDebug((object)"[档案] 启动页/主菜单正在显示，忽略后台档案控制器");
-			return false;
-		}
 		object activeArchiveContentController = GetActiveArchiveContentController();
 		if (activeArchiveContentController != null && IsArchiveControllerPageVisible(activeArchiveContentController, "") && HasArchiveContentVisibleText(activeArchiveContentController))
 		{
 			return true;
 		}
 		object activeCharacterDetailController = GetActiveCharacterDetailController();
-		if (activeCharacterDetailController != null && IsArchiveControllerPageVisible(activeCharacterDetailController, "") && GetArchiveDetailItems(activeCharacterDetailController).Length > 0)
+		if (activeCharacterDetailController != null && IsArchiveControllerPageVisible(activeCharacterDetailController, "") && GetArchiveDetailItems(activeCharacterDetailController).Length != 0)
 		{
 			return true;
 		}
 		object activeArchiveHomeController = GetActiveArchiveHomeController();
-		return activeArchiveHomeController != null && IsArchiveControllerPageVisible(activeArchiveHomeController, "archivePageToggle") && GetArchiveHomeItems(activeArchiveHomeController).Length > 0;
-	}
-
-	private static bool IsStartOrMainMenuPageVisible()
-	{
-		try
+		if (activeArchiveHomeController != null && IsArchiveControllerPageVisible(activeArchiveHomeController, "archivePageToggle"))
 		{
-			if (_gameControllerType != null)
-			{
-				object activeObject = GetActiveObject(_gameControllerType);
-				object fieldValue = GetFieldValue(activeObject, "startPageToggleHide");
-				if (IsToggleHideGameObjectActive(fieldValue))
-				{
-					return true;
-				}
-			}
-			Type type2 = Type.GetType("ToggleHide, Assembly-CSharp");
-			if (type2 == null)
-			{
-				return false;
-			}
-			Array array = FindObjectsOfType(type2);
-			if (array == null)
-			{
-				return false;
-			}
-			foreach (object item in array)
-			{
-				object gameObjectFromComponent2 = GetGameObjectFromComponent(item);
-				string text = GetGameObjectName(gameObjectFromComponent2);
-				if (!string.IsNullOrWhiteSpace(text) && (text.IndexOf("StartPage", StringComparison.OrdinalIgnoreCase) >= 0 || text.IndexOf("MainMenu", StringComparison.OrdinalIgnoreCase) >= 0 || text.Equals("Start", StringComparison.OrdinalIgnoreCase)) && IsToggleHideGameObjectActive(item))
-				{
-					return true;
-				}
-			}
-		}
-		catch (Exception ex)
-		{
-			Log.LogDebug((object)("[档案] 判断启动页/主菜单失败: " + ex.Message));
+			return GetArchiveHomeItems(activeArchiveHomeController).Length != 0;
 		}
 		return false;
 	}
@@ -1245,19 +1180,19 @@ public class Plugin : BaseUnityPlugin
 		try
 		{
 			object activeArchiveContentController = GetActiveArchiveContentController();
-			if (activeArchiveContentController != null && IsArchiveControllerPageVisible(activeArchiveContentController, "") && HasArchiveContentVisibleText(activeArchiveContentController))
+			if (activeArchiveContentController != null)
 			{
 				string archiveContentTitle = GetArchiveContentTitle(activeArchiveContentController);
 				return "archive_content_" + archiveContentTitle;
 			}
 			object activeCharacterDetailController = GetActiveCharacterDetailController();
-			if (activeCharacterDetailController != null && IsArchiveControllerPageVisible(activeCharacterDetailController, "") && GetArchiveDetailItems(activeCharacterDetailController).Length > 0)
+			if (activeCharacterDetailController != null)
 			{
 				OptionItem[] archiveDetailItems = GetArchiveDetailItems(activeCharacterDetailController);
 				return "archive_detail_" + GetTextComponentText(GetFieldValue(activeCharacterDetailController, "characterNameText")) + "_" + archiveDetailItems.Length;
 			}
 			object activeArchiveHomeController = GetActiveArchiveHomeController();
-			if (activeArchiveHomeController != null && IsArchiveControllerPageVisible(activeArchiveHomeController, "archivePageToggle") && GetArchiveHomeItems(activeArchiveHomeController).Length > 0)
+			if (activeArchiveHomeController != null)
 			{
 				OptionItem[] archiveHomeItems = GetArchiveHomeItems(activeArchiveHomeController);
 				return "archive_home_" + archiveHomeItems.Length;
@@ -1315,8 +1250,7 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			MethodInfo method = component.GetType().GetMethod("GetComponent", BindingFlags.Instance | BindingFlags.Public, null, new Type[1] { typeof(Type) }, null);
-			return method?.Invoke(component, new object[1] { componentType });
+			return component.GetType().GetMethod("GetComponent", BindingFlags.Instance | BindingFlags.Public, null, new Type[1] { typeof(Type) }, null)?.Invoke(component, new object[1] { componentType });
 		}
 		catch
 		{
@@ -1364,7 +1298,7 @@ public class Plugin : BaseUnityPlugin
 			_currentSettingIndex = 0;
 			ClearNodeMode("Enter archive");
 			object activeArchiveContentController = GetActiveArchiveContentController();
-			if (activeArchiveContentController != null && IsArchiveControllerPageVisible(activeArchiveContentController, "") && HasArchiveContentVisibleText(activeArchiveContentController))
+			if (activeArchiveContentController != null)
 			{
 				_inArchiveMode = true;
 				_archiveModeName = "Content";
@@ -1374,26 +1308,22 @@ public class Plugin : BaseUnityPlugin
 				return;
 			}
 			object activeCharacterDetailController = GetActiveCharacterDetailController();
-			if (activeCharacterDetailController != null && IsArchiveControllerPageVisible(activeCharacterDetailController, ""))
+			if (activeCharacterDetailController != null)
 			{
 				OptionItem[] archiveDetailItems = GetArchiveDetailItems(activeCharacterDetailController);
-				if (archiveDetailItems.Length > 0)
-				{
-					SetArchiveItems("Detail", archiveDetailItems, "档案详情");
-					return;
-				}
+				SetArchiveItems("Detail", archiveDetailItems, "档案详情");
+				return;
 			}
 			object activeArchiveHomeController = GetActiveArchiveHomeController();
-			if (activeArchiveHomeController != null && IsArchiveControllerPageVisible(activeArchiveHomeController, "archivePageToggle"))
+			if (activeArchiveHomeController != null)
 			{
 				OptionItem[] archiveHomeItems = GetArchiveHomeItems(activeArchiveHomeController);
-				if (archiveHomeItems.Length > 0)
-				{
-					SetArchiveItems("Home", archiveHomeItems, "档案首页");
-					return;
-				}
+				SetArchiveItems("Home", archiveHomeItems, "档案首页");
 			}
-			LeaveArchiveMode();
+			else
+			{
+				LeaveArchiveMode();
+			}
 		}
 		catch (Exception ex)
 		{
@@ -1409,7 +1339,7 @@ public class Plugin : BaseUnityPlugin
 		_archiveItems = items ?? new OptionItem[0];
 		_currentArchiveIndex = 0;
 		Log.LogInfo((object)$"进入{label}模式，共 {_archiveItems.Length} 项");
-		if (_archiveItems.Length > 0)
+		if (_archiveItems.Length != 0)
 		{
 			SpeakCurrentArchiveItem();
 		}
@@ -1424,33 +1354,30 @@ public class Plugin : BaseUnityPlugin
 		List<OptionItem> list = new List<OptionItem>();
 		try
 		{
-			object fieldValue = GetFieldValue(controller, "characterCards");
-			IEnumerable<object> enumerable = EnumerateObjects(fieldValue);
+			IEnumerable<object> enumerable = EnumerateObjects(GetFieldValue(controller, "characterCards"));
 			int num = 0;
 			foreach (object item in enumerable)
 			{
-				if (item == null || !IsComponentActiveInHierarchy(item))
+				if (item != null && IsComponentActiveInHierarchy(item))
 				{
-					continue;
+					string text = InvokeString(item, "GetCharacterName");
+					string text2 = InvokeString(GetFieldValue(item, "characterProfile"), "GetUnlockProgressText");
+					if (!string.IsNullOrWhiteSpace(text2))
+					{
+						text = text + "，解锁 " + text2;
+					}
+					if (string.IsNullOrWhiteSpace(text))
+					{
+						text = "角色 " + (num + 1);
+					}
+					list.Add(new OptionItem
+					{
+						Text = text,
+						ClickableComponent = item,
+						Index = num
+					});
+					num++;
 				}
-				string text = InvokeString(item, "GetCharacterName");
-				object fieldValue2 = GetFieldValue(item, "characterProfile");
-				string text2 = InvokeString(fieldValue2, "GetUnlockProgressText");
-				if (!string.IsNullOrWhiteSpace(text2))
-				{
-					text = text + "，解锁 " + text2;
-				}
-				if (string.IsNullOrWhiteSpace(text))
-				{
-					text = "角色 " + (num + 1);
-				}
-				list.Add(new OptionItem
-				{
-					Text = text,
-					ClickableComponent = item,
-					Index = num
-				});
-				num++;
 			}
 		}
 		catch (Exception ex)
@@ -1493,8 +1420,7 @@ public class Plugin : BaseUnityPlugin
 
 	private static string GetArchiveListItemText(object item, int index)
 	{
-		object fieldValue = GetFieldValue(item, "archiveEntry");
-		string text = InvokeString(fieldValue, "GetDisplayTitle");
+		string text = InvokeString(GetFieldValue(item, "archiveEntry"), "GetDisplayTitle");
 		if (string.IsNullOrWhiteSpace(text))
 		{
 			text = GetTextComponentText(GetFieldValue(item, "titleText"));
@@ -1506,17 +1432,21 @@ public class Plugin : BaseUnityPlugin
 		bool flag = false;
 		try
 		{
-			object obj = GetFieldValue(item, "clickButton");
-			PropertyInfo property = obj?.GetType().GetProperty("interactable", BindingFlags.Instance | BindingFlags.Public);
-			if (property != null)
+			object fieldValue = GetFieldValue(item, "clickButton");
+			PropertyInfo propertyInfo = fieldValue?.GetType().GetProperty("interactable", BindingFlags.Instance | BindingFlags.Public);
+			if (propertyInfo != null)
 			{
-				flag = (bool)property.GetValue(obj);
+				flag = (bool)propertyInfo.GetValue(fieldValue);
 			}
 		}
 		catch
 		{
 		}
-		return flag ? text : (text + "，未解锁");
+		if (!flag)
+		{
+			return text + "，未解锁";
+		}
+		return text;
 	}
 
 	private static void SpeakArchiveContent(object controller)
@@ -1527,11 +1457,11 @@ public class Plugin : BaseUnityPlugin
 		string text = "";
 		if (!string.IsNullOrWhiteSpace(textComponentText))
 		{
-			text += textComponentText + "。";
+			text = text + textComponentText + "。";
 		}
 		if (!string.IsNullOrWhiteSpace(archiveContentTitle))
 		{
-			text += archiveContentTitle + "。";
+			text = text + archiveContentTitle + "。";
 		}
 		if (!string.IsNullOrWhiteSpace(textComponentText2))
 		{
@@ -1555,7 +1485,11 @@ public class Plugin : BaseUnityPlugin
 		{
 			return false;
 		}
-		return !string.IsNullOrWhiteSpace(GetArchiveContentTitle(controller)) || !string.IsNullOrWhiteSpace(GetTextComponentText(GetFieldValue(controller, "archiveContentText")));
+		if (string.IsNullOrWhiteSpace(GetArchiveContentTitle(controller)))
+		{
+			return !string.IsNullOrWhiteSpace(GetTextComponentText(GetFieldValue(controller, "archiveContentText")));
+		}
+		return true;
 	}
 
 	private static bool HandleArchiveKey(int vkCode)
@@ -1571,8 +1505,8 @@ public class Plugin : BaseUnityPlugin
 		}
 		switch (vkCode)
 		{
-		case VK_UP:
-			if (_archiveItems.Length > 0)
+		case 38:
+			if (_archiveItems.Length != 0)
 			{
 				_currentArchiveIndex--;
 				if (_currentArchiveIndex < 0)
@@ -1583,8 +1517,8 @@ public class Plugin : BaseUnityPlugin
 				_suppressCurrentKey = true;
 			}
 			return true;
-		case VK_DOWN:
-			if (_archiveItems.Length > 0)
+		case 40:
+			if (_archiveItems.Length != 0)
 			{
 				_currentArchiveIndex++;
 				if (_currentArchiveIndex >= _archiveItems.Length)
@@ -1595,11 +1529,11 @@ public class Plugin : BaseUnityPlugin
 				_suppressCurrentKey = true;
 			}
 			return true;
-		case VK_RETURN:
+		case 13:
 			ActivateCurrentArchiveItem();
 			_suppressCurrentKey = true;
 			return true;
-		case VK_LEFT:
+		case 37:
 			if (TryClickArchiveButton("leftArrowButton"))
 			{
 				MarkNeedDetect();
@@ -1607,7 +1541,7 @@ public class Plugin : BaseUnityPlugin
 				return true;
 			}
 			return false;
-		case VK_RIGHT:
+		case 39:
 			if (TryClickArchiveButton("rightArrowButton"))
 			{
 				MarkNeedDetect();
@@ -1615,8 +1549,8 @@ public class Plugin : BaseUnityPlugin
 				return true;
 			}
 			return false;
-		case VK_ESCAPE:
-		case VK_BACK:
+		case 8:
+		case 27:
 			if (TryClickArchiveButton("returnButton"))
 			{
 				LeaveArchiveMode();
@@ -1646,7 +1580,7 @@ public class Plugin : BaseUnityPlugin
 			_currentArchiveIndex = _archiveItems.Length - 1;
 		}
 		OptionItem optionItem = _archiveItems[_currentArchiveIndex];
-		string text = string.IsNullOrWhiteSpace(optionItem.Text) ? ("第 " + (_currentArchiveIndex + 1) + " 项") : optionItem.Text;
+		string text = (string.IsNullOrWhiteSpace(optionItem.Text) ? ("第 " + (_currentArchiveIndex + 1) + " 项") : optionItem.Text);
 		PlayGameSound("Highlight");
 		TolkHelper.Speak(text, interrupt: true);
 	}
@@ -1686,7 +1620,7 @@ public class Plugin : BaseUnityPlugin
 		{
 			return false;
 		}
-		PlayGameSound(fieldName == "returnButton" ? "Back" : "Highlight");
+		PlayGameSound((fieldName == "returnButton") ? "Back" : "Highlight");
 		return ClickComponent(obj);
 	}
 
@@ -1769,23 +1703,23 @@ public class Plugin : BaseUnityPlugin
 	private static void EnterOptionsModeAuto()
 	{
 		OptionItem[] endingPageOptions = GetEndingPageOptions();
-		if (endingPageOptions != null && endingPageOptions.Length > 0)
+		if (endingPageOptions != null && endingPageOptions.Length != 0)
 		{
 			SetOptions(endingPageOptions);
 			return;
 		}
-		OptionItem[] clickableOptions = GetClickableOptions();
-		if (clickableOptions == null || clickableOptions.Length == 0)
+		OptionItem[] array = GetClickableOptions();
+		if (array == null || array.Length == 0)
 		{
-			clickableOptions = GetExploreInteractionOptions();
-			if (clickableOptions == null || clickableOptions.Length == 0)
+			array = GetExploreInteractionOptions();
+			if (array == null || array.Length == 0)
 			{
 				LeaveOptions();
 				return;
 			}
-			Log.LogInfo((object)$"[探索] 进入探索交互模式，共 {clickableOptions.Length} 个交互点");
+			Log.LogInfo((object)$"[探索] 进入探索交互模式，共 {array.Length} 个交互点");
 		}
-		SetOptions(SortOptions(clickableOptions));
+		SetOptions(SortOptions(array));
 	}
 
 	private static OptionItem[] GetOptionsFromGameController()
@@ -1884,32 +1818,25 @@ public class Plugin : BaseUnityPlugin
 			}
 			List<OptionItem> list = new List<OptionItem>();
 			OptionItem[] array = allVisibleTextsWithPosition;
-			OptionItem[] array2 = array;
-			foreach (OptionItem optionItem in array2)
+			foreach (OptionItem optionItem in array)
 			{
 				if (optionItem.ClickableComponent != null)
 				{
 					list.Add(optionItem);
 				}
 			}
-			OptionItem[] splashStartOptions = GetSplashStartOptions(allVisibleTextsWithPosition);
-			if (splashStartOptions.Length > 0)
+			OptionItem[] confirmationDialogOptions = GetConfirmationDialogOptions(list);
+			if (confirmationDialogOptions.Length >= 2)
 			{
-				Log.LogInfo((object)("[选项过滤] 检测到启动页点击开始，忽略后台按钮: " + splashStartOptions[0].Text));
-				return splashStartOptions;
-			}
-			OptionItem[] confirmationOptions = GetConfirmationDialogOptions(list);
-			if (confirmationOptions.Length >= 2)
-			{
-				Log.LogInfo((object)$"[选项过滤] 检测到确认弹窗，仅保留 {confirmationOptions.Length} 个弹窗按钮");
-				return confirmationOptions;
+				Log.LogInfo((object)$"[选项过滤] 检测到确认弹窗，仅保留 {confirmationDialogOptions.Length} 个弹窗按钮");
+				return confirmationDialogOptions;
 			}
 			if (list.Count >= 2 && list.Count <= 12)
 			{
 				return list.ToArray();
 			}
 			OptionItem[] singleStartOptions = GetSingleStartOptions(allVisibleTextsWithPosition);
-			if (list.Count < 2 && singleStartOptions.Length > 0)
+			if (list.Count < 2 && singleStartOptions.Length != 0)
 			{
 				Log.LogInfo((object)("[选项过滤] 检测到单按钮启动页: " + singleStartOptions[0].Text));
 				return singleStartOptions;
@@ -1918,7 +1845,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				Log.LogInfo((object)$"[选项过滤] 可点击候选过多({list.Count})，疑似包含后台页面，改用短文本筛选");
 			}
-			string[] array3 = new string[34]
+			string[] array2 = new string[34]
 			{
 				"威望", "好感", "返回", "版本", "Version", "Demo", "进度", "章节", "第", "章",
 				"节", "回", "设置", "选项", "音量", "画质", "分辨率", "全屏", "语言", "字幕",
@@ -1927,8 +1854,7 @@ public class Plugin : BaseUnityPlugin
 			};
 			List<OptionItem> list2 = new List<OptionItem>();
 			array = allVisibleTextsWithPosition;
-			OptionItem[] array4 = array;
-			foreach (OptionItem optionItem2 in array4)
+			foreach (OptionItem optionItem2 in array)
 			{
 				string text = optionItem2.Text.Trim();
 				if (string.IsNullOrEmpty(text) || text.Length >= 20)
@@ -1936,8 +1862,8 @@ public class Plugin : BaseUnityPlugin
 					continue;
 				}
 				bool flag = false;
-				string[] array5 = array3;
-				foreach (string value in array5)
+				string[] array3 = array2;
+				foreach (string value in array3)
 				{
 					if (text.Contains(value))
 					{
@@ -1953,7 +1879,7 @@ public class Plugin : BaseUnityPlugin
 				string text2 = text;
 				foreach (char c in text2)
 				{
-					if ((c >= '一' && c <= '鿿') || char.IsLetter(c))
+					if ((c >= '一' && c <= '\u9fff') || char.IsLetter(c))
 					{
 						flag2 = true;
 						break;
@@ -1979,12 +1905,12 @@ public class Plugin : BaseUnityPlugin
 					return new OptionItem[0];
 				}
 			}
-			for (int m = 0; m < Math.Min(list2.Count, val); m++)
+			for (int k = 0; k < Math.Min(list2.Count, val); k++)
 			{
 				bool flag3 = false;
 				foreach (OptionItem item in list3)
 				{
-					if (item.Text == list2[m].Text)
+					if (item.Text == list2[k].Text)
 					{
 						flag3 = true;
 						break;
@@ -1992,7 +1918,7 @@ public class Plugin : BaseUnityPlugin
 				}
 				if (!flag3)
 				{
-					list3.Add(list2[m]);
+					list3.Add(list2[k]);
 				}
 			}
 			if (list3.Count >= 2 && list3.Count <= 12)
@@ -2014,34 +1940,33 @@ public class Plugin : BaseUnityPlugin
 		{
 			return new OptionItem[0];
 		}
-		string[] confirmTexts = new string[5] { "确定", "确认", "是", "退出", "离开" };
-		string[] cancelTexts = new string[5] { "取消", "否", "返回", "关闭", "不" };
-		List<OptionItem> confirms = new List<OptionItem>();
-		List<OptionItem> cancels = new List<OptionItem>();
+		string[] values = new string[5] { "确定", "确认", "是", "退出", "离开" };
+		string[] values2 = new string[5] { "取消", "否", "返回", "关闭", "不" };
+		List<OptionItem> list = new List<OptionItem>();
+		List<OptionItem> list2 = new List<OptionItem>();
 		foreach (OptionItem candidate in candidates)
 		{
 			string text = candidate?.Text?.Trim();
-			if (string.IsNullOrEmpty(text) || text.Length > 8)
+			if (!string.IsNullOrEmpty(text) && text.Length <= 8)
 			{
-				continue;
-			}
-			if (MatchesAnyDialogButtonText(text, confirmTexts))
-			{
-				confirms.Add(candidate);
-			}
-			else if (MatchesAnyDialogButtonText(text, cancelTexts))
-			{
-				cancels.Add(candidate);
+				if (MatchesAnyDialogButtonText(text, values))
+				{
+					list.Add(candidate);
+				}
+				else if (MatchesAnyDialogButtonText(text, values2))
+				{
+					list2.Add(candidate);
+				}
 			}
 		}
-		if (confirms.Count == 0 || cancels.Count == 0)
+		if (list.Count == 0 || list2.Count == 0)
 		{
 			return new OptionItem[0];
 		}
-		List<OptionItem> result = new List<OptionItem>();
-		result.AddRange(confirms);
-		result.AddRange(cancels);
-		return SortOptions(result.ToArray());
+		List<OptionItem> list3 = new List<OptionItem>();
+		list3.AddRange(list);
+		list3.AddRange(list2);
+		return SortOptions(list3.ToArray());
 	}
 
 	private static bool MatchesAnyDialogButtonText(string text, string[] values)
@@ -2064,23 +1989,6 @@ public class Plugin : BaseUnityPlugin
 		return false;
 	}
 
-	private static OptionItem[] GetSplashStartOptions(OptionItem[] visibleTexts)
-	{
-		if (visibleTexts == null || visibleTexts.Length == 0)
-		{
-			return new OptionItem[0];
-		}
-		foreach (OptionItem optionItem in visibleTexts)
-		{
-			string text = optionItem?.Text?.Trim();
-			if (text == "点击开始")
-			{
-				return new OptionItem[1] { optionItem };
-			}
-		}
-		return new OptionItem[0];
-	}
-
 	private static OptionItem[] GetSingleStartOptions(OptionItem[] visibleTexts)
 	{
 		if (visibleTexts == null || visibleTexts.Length == 0)
@@ -2096,7 +2004,8 @@ public class Plugin : BaseUnityPlugin
 			{
 				continue;
 			}
-			foreach (string value in array)
+			string[] array2 = array;
+			foreach (string value in array2)
 			{
 				if (text.Equals(value, StringComparison.OrdinalIgnoreCase) || text.Contains(value))
 				{
@@ -2109,7 +2018,9 @@ public class Plugin : BaseUnityPlugin
 		{
 			return new OptionItem[0];
 		}
-		return list.GroupBy((OptionItem o) => o.Text).Select((IGrouping<string, OptionItem> g) => g.First()).ToArray();
+		return (from o in list
+			group o by o.Text into g
+			select g.First()).ToArray();
 	}
 
 	private static bool IsInSettingsPage()
@@ -2146,12 +2057,10 @@ public class Plugin : BaseUnityPlugin
 			string[] array2 = new string[8] { "设置", "选项", "音量", "画质", "分辨率", "全屏", "语言", "字幕" };
 			int num = 0;
 			OptionItem[] array3 = allVisibleTextsWithPosition;
-			OptionItem[] array4 = array3;
-			foreach (OptionItem optionItem in array4)
+			foreach (OptionItem optionItem in array3)
 			{
-				string[] array5 = array2;
-				string[] array6 = array5;
-				foreach (string value in array6)
+				string[] array4 = array2;
+				foreach (string value in array4)
 				{
 					if (optionItem.Text.Contains(value))
 					{
@@ -2200,12 +2109,12 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (list.Count > 0)
 			{
-				SettingItem[] array2 = (_settings = list.OrderBy((SettingItem s) => s.ScreenY).ToArray());
-				LogSettingsList(array2);
+				SettingItem[] array = (_settings = list.OrderBy((SettingItem s) => s.ScreenY).ToArray());
+				LogSettingsList(array);
 				_currentSettingIndex = 0;
 				_inSettingsMode = true;
 				_inOptionsMode = false;
-				if (array2.Length != 0)
+				if (array.Length != 0)
 				{
 					SpeakCurrentSetting();
 				}
@@ -2239,20 +2148,16 @@ public class Plugin : BaseUnityPlugin
 			{
 				return;
 			}
-			PropertyInfo property = type.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public);
-			object obj = property?.GetValue(null);
-			if (obj == null)
+			object obj = type.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public)?.GetValue(null);
+			if (obj != null)
 			{
-				return;
+				Type nestedType = type.GetNestedType("SoundType", BindingFlags.Public);
+				if (!(nestedType == null))
+				{
+					object obj2 = Enum.Parse(nestedType, soundName);
+					type.GetMethod("PlaySound", BindingFlags.Instance | BindingFlags.Public)?.Invoke(obj, new object[1] { obj2 });
+				}
 			}
-			Type nestedType = type.GetNestedType("SoundType", BindingFlags.Public);
-			if (nestedType == null)
-			{
-				return;
-			}
-			object obj2 = Enum.Parse(nestedType, soundName);
-			MethodInfo method = type.GetMethod("PlaySound", BindingFlags.Instance | BindingFlags.Public);
-			method?.Invoke(obj, new object[1] { obj2 });
 		}
 		catch (Exception ex)
 		{
@@ -2271,7 +2176,7 @@ public class Plugin : BaseUnityPlugin
 			SettingItem settingItem = items[i];
 			if (settingItem != null)
 			{
-				Log.LogInfo((object)$"[设置列表] {i + 1}/{items.Length}: {settingItem.Name}, type={settingItem.Type}, y={settingItem.ScreenY}, component={(settingItem.Component?.GetType().Name ?? "null")}");
+				Log.LogInfo((object)string.Format("[设置列表] {0}/{1}: {2}, type={3}, y={4}, component={5}", i + 1, items.Length, settingItem.Name, settingItem.Type, settingItem.ScreenY, settingItem.Component?.GetType().Name ?? "null"));
 			}
 		}
 	}
@@ -2323,36 +2228,36 @@ public class Plugin : BaseUnityPlugin
 			settingItem.Name = CleanSettingName(name);
 			settingItem.ClickComponent = component;
 			settingItem.ScreenY = screenY;
-			Type type2 = Type.GetType("UnityEngine.UI.Slider, UnityEngine.UI");
-			Type type3 = Type.GetType("UnityEngine.UI.Toggle, UnityEngine.UI");
-			Type type4 = Type.GetType("UnityEngine.UI.Dropdown, UnityEngine.UI");
-			Type type5 = Type.GetType("TMPro.TMP_Dropdown, Unity.TextMeshPro");
-			if ((type5 != null && type5.IsInstanceOfType(component)) || (type4 != null && type4.IsInstanceOfType(component)))
+			Type type = Type.GetType("UnityEngine.UI.Slider, UnityEngine.UI");
+			Type type2 = Type.GetType("UnityEngine.UI.Toggle, UnityEngine.UI");
+			Type type3 = Type.GetType("UnityEngine.UI.Dropdown, UnityEngine.UI");
+			Type type4 = Type.GetType("TMPro.TMP_Dropdown, Unity.TextMeshPro");
+			if ((type4 != null && type4.IsInstanceOfType(component)) || (type3 != null && type3.IsInstanceOfType(component)))
 			{
 				return CreateDropdownSettingItem(settingItem, component);
 			}
-			if (type3 != null && type3.IsInstanceOfType(component))
-			{
-				return CreateToggleSettingItem(settingItem, component, type3);
-			}
 			if (type2 != null && type2.IsInstanceOfType(component))
 			{
-				return CreateSliderSettingItem(settingItem, component, type2);
+				return CreateToggleSettingItem(settingItem, component, type2);
 			}
-			object obj = FindComponentNear(component, type2);
-			if (type2 != null && obj != null)
+			if (type != null && type.IsInstanceOfType(component))
 			{
-				return CreateSliderSettingItem(settingItem, obj, type2);
+				return CreateSliderSettingItem(settingItem, component, type);
 			}
-			object obj2 = FindComponentNear(component, type3);
-			if (type3 != null && obj2 != null)
+			object obj = FindComponentNear(component, type);
+			if (type != null && obj != null)
 			{
-				return CreateToggleSettingItem(settingItem, obj2, type3);
+				return CreateSliderSettingItem(settingItem, obj, type);
 			}
-			object obj3 = FindComponentNear(component, type5);
+			object obj2 = FindComponentNear(component, type2);
+			if (type2 != null && obj2 != null)
+			{
+				return CreateToggleSettingItem(settingItem, obj2, type2);
+			}
+			object obj3 = FindComponentNear(component, type4);
 			if (obj3 == null)
 			{
-				obj3 = FindComponentNear(component, type4);
+				obj3 = FindComponentNear(component, type3);
 			}
 			if (obj3 != null)
 			{
@@ -2440,15 +2345,15 @@ public class Plugin : BaseUnityPlugin
 			ResolveSettingsTypes();
 			object activeObject = GetActiveObject(_settingsType);
 			float order = 0f;
-			object obj = GetFieldValue(activeObject, "languageDropdownController");
-			AddSettingFromField(list, obj, "languageDropdown", "语言", ref order);
-			object obj2 = GetFieldValue(activeObject, "volumeController") ?? GetActiveObject(_audioManagerType);
-			AddSettingFromField(list, obj2, "volumeSlider", "主音量", ref order);
-			AddSettingFromField(list, obj2, "soundEffectSlider", "音效音量", ref order);
+			object fieldValue = GetFieldValue(activeObject, "languageDropdownController");
+			AddSettingFromField(list, fieldValue, "languageDropdown", "语言", ref order);
+			object owner = GetFieldValue(activeObject, "volumeController") ?? GetActiveObject(_audioManagerType);
+			AddSettingFromField(list, owner, "volumeSlider", "主音量", ref order);
+			AddSettingFromField(list, owner, "soundEffectSlider", "音效音量", ref order);
 			AddSettingFromValue(list, GetFieldValue(activeObject, "heroVoiceDropdown"), "男主声音", ref order);
-			object obj3 = GetFieldValue(activeObject, "resolutionSettingsController") ?? GetActiveObject(Type.GetType("ResolutionSettingsController, Assembly-CSharp"));
-			AddSettingFromField(list, obj3, "resolutionDropdown", "分辨率", ref order);
-			AddSettingFromField(list, obj3, "displayModeDropdown", "显示模式", ref order);
+			object owner2 = GetFieldValue(activeObject, "resolutionSettingsController") ?? GetActiveObject(Type.GetType("ResolutionSettingsController, Assembly-CSharp"));
+			AddSettingFromField(list, owner2, "resolutionDropdown", "分辨率", ref order);
+			AddSettingFromField(list, owner2, "displayModeDropdown", "显示模式", ref order);
 			object activeObject2 = GetActiveObject(Type.GetType("AudioTrackSettingsController, Assembly-CSharp"));
 			AddSettingFromField(list, activeObject2, "audioTrackDropdown", "外置音轨", ref order);
 			AddVisibleSettingControls(list, visibleTexts, ref order);
@@ -2484,16 +2389,13 @@ public class Plugin : BaseUnityPlugin
 				continue;
 			}
 			string text = optionItem.Text.Trim();
-			if (text.Length > 30 || IsSettingTextAlreadyCovered(list, text))
-			{
-				continue;
-			}
-			if (IsStandaloneSettingValue(text))
+			if (text.Length > 30 || IsSettingTextAlreadyCovered(list, text) || IsStandaloneSettingValue(text))
 			{
 				continue;
 			}
 			bool flag = false;
-			foreach (string value in array)
+			string[] array2 = array;
+			foreach (string value in array2)
 			{
 				if (text.Contains(value))
 				{
@@ -2505,33 +2407,38 @@ public class Plugin : BaseUnityPlugin
 			{
 				continue;
 			}
-			if (text == "系统设置")
-			{
-				continue;
-			}
 			SettingItem settingItem;
-			if ((text == "返回" || text == "关闭" || text == "Back") && optionItem.ClickableComponent != null)
+			switch (text)
 			{
-				settingItem = new SettingItem
+			case "返回":
+			case "关闭":
+			case "Back":
+				if (optionItem.ClickableComponent != null)
 				{
-					Name = text,
-					Type = SettingItem.SettingType.Button,
-					Component = optionItem.ClickableComponent,
-					ClickComponent = optionItem.ClickableComponent
-				};
-			}
-			else
-			{
+					settingItem = new SettingItem
+					{
+						Name = text,
+						Type = SettingItem.SettingType.Button,
+						Component = optionItem.ClickableComponent,
+						ClickComponent = optionItem.ClickableComponent
+					};
+					break;
+				}
+				goto default;
+			default:
 				settingItem = CreateKnownFallbackSetting(optionItem);
 				if (settingItem == null)
 				{
-					string settingTextWithValue = BuildSettingTextWithValue(optionItem, visibleTexts);
+					string name = BuildSettingTextWithValue(optionItem, visibleTexts);
 					settingItem = new SettingItem
 					{
-						Name = settingTextWithValue,
+						Name = name,
 						Type = SettingItem.SettingType.Text
 					};
 				}
+				break;
+			case "系统设置":
+				continue;
 			}
 			settingItem.ScreenX = optionItem.ScreenX;
 			settingItem.ScreenY = optionItem.ScreenY;
@@ -2551,10 +2458,10 @@ public class Plugin : BaseUnityPlugin
 		try
 		{
 			ResolveSettingsTypes();
-			object activeObject4 = GetActiveObject(_settingsType);
-			object activeObject5 = GetActiveObject(_audioManagerType);
-			object obj = GetFieldValue(activeObject4, "volumeController") ?? activeObject5;
-			object obj2 = GetFieldValue(activeObject4, "resolutionSettingsController") ?? GetActiveObject(Type.GetType("ResolutionSettingsController, Assembly-CSharp"));
+			object activeObject = GetActiveObject(_settingsType);
+			object activeObject2 = GetActiveObject(_audioManagerType);
+			object obj = GetFieldValue(activeObject, "volumeController") ?? activeObject2;
+			object obj2 = GetFieldValue(activeObject, "resolutionSettingsController") ?? GetActiveObject(Type.GetType("ResolutionSettingsController, Assembly-CSharp"));
 			if (text.Contains("主音量"))
 			{
 				return CreateNamedSettingFromComponent(GetFieldValue(obj, "volumeSlider"), "主音量", label);
@@ -2565,8 +2472,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (text.Contains("语言"))
 			{
-				object fieldValue = GetFieldValue(GetFieldValue(activeObject4, "languageDropdownController"), "languageDropdown");
-				return CreateNamedSettingFromComponent(fieldValue, "语言", label);
+				return CreateNamedSettingFromComponent(GetFieldValue(GetFieldValue(activeObject, "languageDropdownController"), "languageDropdown"), "语言", label);
 			}
 			if (text.Contains("分辨率"))
 			{
@@ -2578,9 +2484,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (text.Contains("字幕"))
 			{
-				object activeObject = GetActiveObject(Type.GetType("SubtitleSettingsController, Assembly-CSharp"));
-				object fieldValue = GetFieldValue(activeObject, "subtitleDropdown");
-				SettingItem settingItem = CreateNamedSettingFromComponent(fieldValue, "字幕开关", label);
+				SettingItem settingItem = CreateNamedSettingFromComponent(GetFieldValue(GetActiveObject(Type.GetType("SubtitleSettingsController, Assembly-CSharp")), "subtitleDropdown"), "字幕开关", label);
 				if (settingItem != null)
 				{
 					Log.LogInfo((object)"[设置兜底控件] 字幕开关: Dropdown");
@@ -2589,9 +2493,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (text.Contains("敏感词消音") || text.Contains("外置音轨") || text.Contains("音轨"))
 			{
-				object activeObject2 = GetActiveObject(Type.GetType("AudioTrackSettingsController, Assembly-CSharp"));
-				object fieldValue2 = GetFieldValue(activeObject2, "audioTrackDropdown");
-				SettingItem settingItem2 = CreateNamedSettingFromComponent(fieldValue2, "敏感词消音", label);
+				SettingItem settingItem2 = CreateNamedSettingFromComponent(GetFieldValue(GetActiveObject(Type.GetType("AudioTrackSettingsController, Assembly-CSharp")), "audioTrackDropdown"), "敏感词消音", label);
 				if (settingItem2 != null)
 				{
 					Log.LogInfo((object)"[设置兜底控件] 敏感词消音: Dropdown");
@@ -2600,8 +2502,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (text.Contains("男主声音") || text.Contains("男主"))
 			{
-				object fieldValue3 = GetFieldValue(activeObject4, "heroVoiceDropdown");
-				SettingItem settingItem3 = CreateNamedSettingFromComponent(fieldValue3, "男主声音", label);
+				SettingItem settingItem3 = CreateNamedSettingFromComponent(GetFieldValue(activeObject, "heroVoiceDropdown"), "男主声音", label);
 				if (settingItem3 != null)
 				{
 					Log.LogInfo((object)"[设置兜底控件] 男主声音: Dropdown");
@@ -2618,7 +2519,7 @@ public class Plugin : BaseUnityPlugin
 
 	private static SettingItem CreateNamedSettingFromComponent(object component, string name, OptionItem label)
 	{
-		SettingItem settingItem = CreateSettingItemFromComponent(component, name, label != null ? label.ScreenY : 0f);
+		SettingItem settingItem = CreateSettingItemFromComponent(component, name, label?.ScreenY ?? 0f);
 		if (settingItem == null)
 		{
 			return null;
@@ -2648,10 +2549,10 @@ public class Plugin : BaseUnityPlugin
 			Log.LogInfo((object)("[设置状态] " + text + " => " + knownSettingValue));
 			return AppendSettingValue(text, knownSettingValue);
 		}
-		string nearbySettingValue = FindNearbySettingValue(label, visibleTexts);
-		if (!string.IsNullOrWhiteSpace(nearbySettingValue) && !text.Contains(nearbySettingValue))
+		string text2 = FindNearbySettingValue(label, visibleTexts);
+		if (!string.IsNullOrWhiteSpace(text2) && !text.Contains(text2))
 		{
-			return text + " " + nearbySettingValue;
+			return text + " " + text2;
 		}
 		return text;
 	}
@@ -2673,6 +2574,8 @@ public class Plugin : BaseUnityPlugin
 
 	private static string GetKnownSettingValue(string label)
 	{
+		//IL_0170: Unknown result type (might be due to invalid IL or missing references)
+		//IL_017a: Expected I4, but got Unknown
 		if (string.IsNullOrWhiteSpace(label))
 		{
 			return "";
@@ -2682,15 +2585,15 @@ public class Plugin : BaseUnityPlugin
 		{
 			if (label.Contains("字幕"))
 			{
-				return PlayerPrefs.GetInt("SubtitleVisible", 1) != 0 ? "开启" : "关闭";
+				return (PlayerPrefs.GetInt("SubtitleVisible", 1) != 0) ? "开启" : "关闭";
 			}
 			if (label.Contains("敏感词消音") || label.Contains("外置音轨") || label.Contains("音轨"))
 			{
-				return PlayerPrefs.GetInt("ExternalAudioTrack", 0) == 1 ? "开启" : "关闭";
+				return (PlayerPrefs.GetInt("ExternalAudioTrack", 0) == 1) ? "开启" : "关闭";
 			}
 			if (label.Contains("男主声音") || label.Contains("男主"))
 			{
-				return PlayerPrefs.GetInt("HeroVoice", 1) == 1 ? "开启" : "关闭";
+				return (PlayerPrefs.GetInt("HeroVoice", 1) == 1) ? "开启" : "关闭";
 			}
 			if (label.Contains("语言"))
 			{
@@ -2698,16 +2601,16 @@ public class Plugin : BaseUnityPlugin
 			}
 			if (label.Contains("分辨率"))
 			{
-				int @int = PlayerPrefs.GetInt("ResolutionWidth", 0);
-				int int2 = PlayerPrefs.GetInt("ResolutionHeight", 0);
-				if (@int <= 0 || int2 <= 0)
+				int num = PlayerPrefs.GetInt("ResolutionWidth", 0);
+				int num2 = PlayerPrefs.GetInt("ResolutionHeight", 0);
+				if (num <= 0 || num2 <= 0)
 				{
-					@int = Screen.width;
-					int2 = Screen.height;
+					num = Screen.width;
+					num2 = Screen.height;
 				}
-				if (@int > 0 && int2 > 0)
+				if (num > 0 && num2 > 0)
 				{
-					return $"{@int}x{int2}";
+					return $"{num}x{num2}";
 				}
 			}
 			if (label.Contains("显示模式") || label == "全屏" || label == "窗口")
@@ -2728,26 +2631,20 @@ public class Plugin : BaseUnityPlugin
 		{
 			return "中文";
 		}
-		switch (language.Trim())
+		return language.Trim() switch
 		{
-		case "Chinese":
-			return "中文";
-		case "Traditional":
-			return "繁体中文";
-		case "English":
-			return "English";
-		case "Japanese":
-			return "日语";
-		case "Korean":
-			return "韩语";
-		default:
-			return language.Trim();
-		}
+			"Chinese" => "中文", 
+			"Traditional" => "繁体中文", 
+			"English" => "English", 
+			"Japanese" => "日语", 
+			"Korean" => "韩语", 
+			_ => language.Trim(), 
+		};
 	}
 
 	private static string NormalizeDisplayModeName(int mode)
 	{
-		if (mode == (int)FullScreenMode.Windowed)
+		if (mode == 3)
 		{
 			return "窗口";
 		}
@@ -2761,36 +2658,50 @@ public class Plugin : BaseUnityPlugin
 			return false;
 		}
 		text = text.Trim();
-		return text == "开启" || text == "关闭" || text == "打开" || text == "全屏" || text == "窗口" || IsResolutionValue(text) || text.EndsWith("%") || text.EndsWith("％");
+		switch (text)
+		{
+		default:
+			if (!IsResolutionValue(text) && !text.EndsWith("%"))
+			{
+				return text.EndsWith("％");
+			}
+			break;
+		case "开启":
+		case "关闭":
+		case "打开":
+		case "全屏":
+		case "窗口":
+			break;
+		}
+		return true;
 	}
 
 	private static string FindNearbySettingValue(OptionItem label, OptionItem[] visibleTexts)
 	{
 		OptionItem optionItem = null;
 		float num = float.MaxValue;
-		string labelText = (label?.Text ?? "").Trim();
+		string label2 = (label?.Text ?? "").Trim();
 		foreach (OptionItem optionItem2 in visibleTexts)
 		{
 			if (optionItem2 == null || optionItem2 == label || string.IsNullOrWhiteSpace(optionItem2.Text))
 			{
 				continue;
 			}
-			string text = optionItem2.Text.Trim();
-			if (!IsLikelySettingValueForLabel(labelText, text))
+			string value = optionItem2.Text.Trim();
+			if (!IsLikelySettingValueForLabel(label2, value))
 			{
 				continue;
 			}
 			float num2 = Math.Abs(optionItem2.ScreenY - label.ScreenY);
-			if (num2 > 80f)
+			if (!(num2 > 80f))
 			{
-				continue;
-			}
-			float num3 = Math.Abs(optionItem2.ScreenX - label.ScreenX);
-			float num4 = num2 * 4f + num3;
-			if (num4 < num)
-			{
-				num = num4;
-				optionItem = optionItem2;
+				float num3 = Math.Abs(optionItem2.ScreenX - label.ScreenX);
+				float num4 = num2 * 4f + num3;
+				if (num4 < num)
+				{
+					num = num4;
+					optionItem = optionItem2;
+				}
 			}
 		}
 		return optionItem?.Text?.Trim() ?? "";
@@ -2810,19 +2721,40 @@ public class Plugin : BaseUnityPlugin
 		}
 		if (label.Contains("显示模式"))
 		{
-			return value == "全屏" || value == "窗口";
+			if (!(value == "全屏"))
+			{
+				return value == "窗口";
+			}
+			return true;
 		}
 		if (label.Contains("语言"))
 		{
-			return value == "中文" || value == "English" || value.Contains("日本") || value.Contains("한국") || value.Contains("繁");
+			if (!(value == "中文") && !(value == "English") && !value.Contains("日本") && !value.Contains("한국"))
+			{
+				return value.Contains("繁");
+			}
+			return true;
 		}
 		if (label.Contains("音量"))
 		{
-			return value.EndsWith("%") || value.EndsWith("％");
+			if (!value.EndsWith("%"))
+			{
+				return value.EndsWith("％");
+			}
+			return true;
 		}
 		if (label.Contains("字幕") || label.Contains("消音") || label.Contains("男主") || label.Contains("音轨"))
 		{
-			return value == "开启" || value == "关闭" || value == "打开" || value == "ON" || value == "OFF";
+			switch (value)
+			{
+			default:
+				return value == "OFF";
+			case "开启":
+			case "关闭":
+			case "打开":
+			case "ON":
+				return true;
+			}
 		}
 		return false;
 	}
@@ -2856,28 +2788,41 @@ public class Plugin : BaseUnityPlugin
 			return false;
 		}
 		text = text.Trim();
-		if (text == "开启" || text == "关闭" || text == "打开" || text == "全屏" || text == "窗口" || text == "中文" || text == "English" || text == "ON" || text == "OFF")
+		switch (text)
 		{
+		case "开启":
+		case "关闭":
+		case "打开":
+		case "全屏":
+		case "窗口":
+		case "中文":
+		case "English":
+		case "ON":
+		case "OFF":
 			return true;
-		}
-		if (text.EndsWith("%") || text.EndsWith("％"))
+		default:
 		{
-			return true;
-		}
-		bool flag = false;
-		bool flag2 = false;
-		foreach (char c in text)
-		{
-			if (char.IsDigit(c))
+			if (text.EndsWith("%") || text.EndsWith("％"))
 			{
-				flag = true;
+				return true;
 			}
-			if (c == 'x' || c == 'X' || c == '*' || c == '×')
+			bool flag = false;
+			bool flag2 = false;
+			string text2 = text;
+			foreach (char c in text2)
 			{
-				flag2 = true;
+				if (char.IsDigit(c))
+				{
+					flag = true;
+				}
+				if (c == 'x' || c == 'X' || c == '*' || c == '×')
+				{
+					flag2 = true;
+				}
 			}
+			return flag && flag2;
 		}
-		return flag && flag2;
+		}
 	}
 
 	private static bool IsSettingTextAlreadyCovered(List<SettingItem> list, string text)
@@ -2939,8 +2884,7 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			FieldInfo field = obj.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-			return field?.GetValue(obj);
+			return obj.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(obj);
 		}
 		catch
 		{
@@ -2956,7 +2900,7 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			FieldInfo field = obj.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+			FieldInfo field = obj.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 			if (field == null)
 			{
 				return false;
@@ -2976,7 +2920,7 @@ public class Plugin : BaseUnityPlugin
 		{
 			yield break;
 		}
-		if (value is System.Collections.IEnumerable enumerable && !(value is string))
+		if (value is IEnumerable enumerable && !(value is string))
 		{
 			foreach (object item in enumerable)
 			{
@@ -3002,8 +2946,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				return "";
 			}
-			object obj2 = method.Invoke(obj, null);
-			return obj2?.ToString() ?? "";
+			return method.Invoke(obj, null)?.ToString() ?? "";
 		}
 		catch
 		{
@@ -3018,35 +2961,33 @@ public class Plugin : BaseUnityPlugin
 
 	private static void AddSettingFromValue(List<SettingItem> list, object component, string name, ref float order)
 	{
-		if (list == null || component == null)
+		if (list != null && component != null)
 		{
-			return;
-		}
-		SettingItem settingItem = CreateSettingItemFromComponent(component, name, order);
-		if (settingItem != null && !ContainsSettingComponent(list, settingItem.Component))
-		{
-			settingItem.Name = name;
-			ApplyKnownSettingOptions(settingItem);
-			settingItem.ScreenY = order;
-			list.Add(settingItem);
-			order += 100f;
-			Log.LogInfo((object)$"[设置精准采集] {name}: {settingItem.Type}");
+			SettingItem settingItem = CreateSettingItemFromComponent(component, name, order);
+			if (settingItem != null && !ContainsSettingComponent(list, settingItem.Component))
+			{
+				settingItem.Name = name;
+				ApplyKnownSettingOptions(settingItem);
+				settingItem.ScreenY = order;
+				list.Add(settingItem);
+				order += 100f;
+				Log.LogInfo((object)$"[设置精准采集] {name}: {settingItem.Type}");
+			}
 		}
 	}
 
 	private static void ApplyKnownSettingOptions(SettingItem item)
 	{
-		if (item == null || item.Type != SettingItem.SettingType.Dropdown)
+		if (item != null && item.Type == SettingItem.SettingType.Dropdown)
 		{
-			return;
-		}
-		if (item.Name == "男主声音" || item.Name == "外置音轨" || item.Name == "敏感词消音" || item.Name == "字幕开关")
-		{
-			item.Options = new string[2] { "关闭", "开启" };
-		}
-		else if (item.Name == "显示模式")
-		{
-			item.Options = new string[2] { "全屏", "窗口" };
+			if (item.Name == "男主声音" || item.Name == "外置音轨" || item.Name == "敏感词消音" || item.Name == "字幕开关")
+			{
+				item.Options = new string[2] { "关闭", "开启" };
+			}
+			else if (item.Name == "显示模式")
+			{
+				item.Options = new string[2] { "全屏", "窗口" };
+			}
 		}
 	}
 
@@ -3058,24 +2999,30 @@ public class Plugin : BaseUnityPlugin
 		}
 		foreach (OptionItem optionItem in visibleTexts)
 		{
-			if (optionItem == null || optionItem.ClickableComponent == null)
+			if (optionItem != null && optionItem.ClickableComponent != null)
 			{
-				continue;
-			}
-			string text = (optionItem.Text ?? "").Trim();
-			if (text == "返回" || text == "关闭" || text == "Back")
-			{
-				SettingItem settingItem = new SettingItem();
-				settingItem.Name = text;
-				settingItem.Type = SettingItem.SettingType.Button;
-				settingItem.Component = optionItem.ClickableComponent;
-				settingItem.ClickComponent = optionItem.ClickableComponent;
-				settingItem.ScreenY = order;
-				settingItem.ScreenX = optionItem.ScreenX;
-				settingItem.HasScreenPosition = optionItem.HasScreenPosition;
-				order += 100f;
-				Log.LogInfo((object)$"[设置精准采集] 返回按钮: screen=({optionItem.ScreenX},{optionItem.ScreenY}), hasPos={optionItem.HasScreenPosition}");
-				return settingItem;
+				string text = (optionItem.Text ?? "").Trim();
+				switch (text)
+				{
+				case "返回":
+				case "关闭":
+				case "Back":
+				{
+					SettingItem result = new SettingItem
+					{
+						Name = text,
+						Type = SettingItem.SettingType.Button,
+						Component = optionItem.ClickableComponent,
+						ClickComponent = optionItem.ClickableComponent,
+						ScreenY = order,
+						ScreenX = optionItem.ScreenX,
+						HasScreenPosition = optionItem.HasScreenPosition
+					};
+					order += 100f;
+					Log.LogInfo((object)$"[设置精准采集] 返回按钮: screen=({optionItem.ScreenX},{optionItem.ScreenY}), hasPos={optionItem.HasScreenPosition}");
+					return result;
+				}
+				}
 			}
 		}
 		return null;
@@ -3114,21 +3061,19 @@ public class Plugin : BaseUnityPlugin
 				continue;
 			}
 			SettingItem settingItem = CreateSettingItemFromComponent(item, "", order);
-			if (settingItem == null || settingItem.Type != settingType || ContainsSettingComponent(list, settingItem.Component))
+			if (settingItem != null && settingItem.Type == settingType && !ContainsSettingComponent(list, settingItem.Component))
 			{
-				continue;
+				SetSettingScreenPosition(settingItem);
+				settingItem.Name = GuessSettingNameFromPosition(settingItem, visibleTexts, settingType);
+				if (!IsWeakSettingName(settingItem.Name))
+				{
+					settingItem.ScreenY = order;
+					ApplyKnownSettingOptions(settingItem);
+					list.Add(settingItem);
+					order += 100f;
+					Log.LogInfo((object)$"[设置控件扫描] {settingItem.Name}: {settingItem.Type}");
+				}
 			}
-			SetSettingScreenPosition(settingItem);
-			settingItem.Name = GuessSettingNameFromPosition(settingItem, visibleTexts, settingType);
-			if (IsWeakSettingName(settingItem.Name))
-			{
-				continue;
-			}
-			settingItem.ScreenY = order;
-			ApplyKnownSettingOptions(settingItem);
-			list.Add(settingItem);
-			order += 100f;
-			Log.LogInfo((object)$"[设置控件扫描] {settingItem.Name}: {settingItem.Type}");
 		}
 	}
 
@@ -3145,8 +3090,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				return false;
 			}
-			object gameObjectFromComponent = GetGameObjectFromComponent(component);
-			return IsGameObjectActiveInHierarchy(gameObjectFromComponent);
+			return IsGameObjectActiveInHierarchy(GetGameObjectFromComponent(component));
 		}
 		catch
 		{
@@ -3162,8 +3106,7 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			object gameObjectFromComponent = GetGameObjectFromComponent(item.Component);
-			if (TryGetScreenPosition(gameObjectFromComponent, out var x, out var y))
+			if (TryGetScreenPosition(GetGameObjectFromComponent(item.Component), out var x, out var y))
 			{
 				item.ScreenX = x;
 				item.ScreenY = y;
@@ -3190,34 +3133,29 @@ public class Plugin : BaseUnityPlugin
 				continue;
 			}
 			string text = CleanSettingName(optionItem2.Text);
-			if (IsWeakSettingName(text) || text == "返回" || text == "系统设置")
+			if (!IsWeakSettingName(text) && !(text == "返回") && !(text == "系统设置"))
 			{
-				continue;
-			}
-			float num2 = Math.Abs(optionItem2.ScreenY - item.ScreenY);
-			float num3 = Math.Abs(optionItem2.ScreenX - item.ScreenX);
-			float num4 = num2 * 3f + num3;
-			if (num2 < 90f && num4 < num)
-			{
-				num = num4;
-				optionItem = optionItem2;
+				float num2 = Math.Abs(optionItem2.ScreenY - item.ScreenY);
+				float num3 = Math.Abs(optionItem2.ScreenX - item.ScreenX);
+				float num4 = num2 * 3f + num3;
+				if (num2 < 90f && num4 < num)
+				{
+					num = num4;
+					optionItem = optionItem2;
+				}
 			}
 		}
 		if (optionItem != null)
 		{
 			return CleanSettingName(optionItem.Text);
 		}
-		switch (settingType)
+		return settingType switch
 		{
-		case SettingItem.SettingType.Slider:
-			return "音量";
-		case SettingItem.SettingType.Dropdown:
-			return "选项";
-		case SettingItem.SettingType.Toggle:
-			return "开关";
-		default:
-			return "";
-		}
+			SettingItem.SettingType.Slider => "音量", 
+			SettingItem.SettingType.Dropdown => "选项", 
+			SettingItem.SettingType.Toggle => "开关", 
+			_ => "", 
+		};
 	}
 
 	private static bool ContainsSettingComponent(List<SettingItem> items, object component)
@@ -3248,39 +3186,40 @@ public class Plugin : BaseUnityPlugin
 			{
 				return component;
 			}
-			object gameObject = GetGameObjectFromComponent(component);
-			if (gameObject != null)
+			object gameObjectFromComponent = GetGameObjectFromComponent(component);
+			if (gameObjectFromComponent != null)
 			{
-				object obj = InvokeComponentLookup(gameObject, "GetComponent", targetType);
+				object obj = InvokeComponentLookup(gameObjectFromComponent, "GetComponent", targetType);
 				if (obj != null)
 				{
 					return obj;
 				}
-				obj = InvokeComponentLookup(gameObject, "GetComponentInChildren", targetType);
+				obj = InvokeComponentLookup(gameObjectFromComponent, "GetComponentInChildren", targetType);
 				if (obj != null)
 				{
 					return obj;
 				}
 			}
-			object obj2 = component;
+			object componentOrGameObject = component;
 			for (int i = 0; i < 6; i++)
 			{
-				object parentGameObject = GetParentGameObject(obj2);
-				if (parentGameObject == null)
+				object parentGameObject = GetParentGameObject(componentOrGameObject);
+				if (parentGameObject != null)
 				{
-					break;
+					object obj2 = InvokeComponentLookup(parentGameObject, "GetComponent", targetType);
+					if (obj2 != null)
+					{
+						return obj2;
+					}
+					obj2 = InvokeComponentLookup(parentGameObject, "GetComponentInChildren", targetType);
+					if (obj2 != null)
+					{
+						return obj2;
+					}
+					componentOrGameObject = parentGameObject;
+					continue;
 				}
-				object obj3 = InvokeComponentLookup(parentGameObject, "GetComponent", targetType);
-				if (obj3 != null)
-				{
-					return obj3;
-				}
-				obj3 = InvokeComponentLookup(parentGameObject, "GetComponentInChildren", targetType);
-				if (obj3 != null)
-				{
-					return obj3;
-				}
-				obj2 = parentGameObject;
+				break;
 			}
 		}
 		catch (Exception ex)
@@ -3306,29 +3245,7 @@ public class Plugin : BaseUnityPlugin
 
 	private static object GetGameObjectFromComponent(object component)
 	{
-		if (component == null)
-		{
-			return null;
-		}
-		PropertyInfo property = component.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
-		return property?.GetValue(component);
-	}
-
-	private static string GetGameObjectName(object gameObject)
-	{
-		if (gameObject == null)
-		{
-			return "";
-		}
-		try
-		{
-			PropertyInfo property = gameObject.GetType().GetProperty("name", BindingFlags.Instance | BindingFlags.Public);
-			return property?.GetValue(gameObject) as string ?? "";
-		}
-		catch
-		{
-			return "";
-		}
+		return component?.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public)?.GetValue(component);
 	}
 
 	private static object GetParentGameObject(object componentOrGameObject)
@@ -3339,21 +3256,14 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			object gameObject = GetGameObjectFromComponent(componentOrGameObject) ?? componentOrGameObject;
-			PropertyInfo property = gameObject.GetType().GetProperty("transform", BindingFlags.Instance | BindingFlags.Public);
-			object value = property?.GetValue(gameObject);
-			if (value == null)
+			object obj = GetGameObjectFromComponent(componentOrGameObject) ?? componentOrGameObject;
+			object obj2 = obj.GetType().GetProperty("transform", BindingFlags.Instance | BindingFlags.Public)?.GetValue(obj);
+			if (obj2 == null)
 			{
 				return null;
 			}
-			PropertyInfo property2 = value.GetType().GetProperty("parent", BindingFlags.Instance | BindingFlags.Public);
-			object value2 = property2?.GetValue(value);
-			if (value2 == null)
-			{
-				return null;
-			}
-			PropertyInfo property3 = value2.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
-			return property3?.GetValue(value2);
+			object obj3 = obj2.GetType().GetProperty("parent", BindingFlags.Instance | BindingFlags.Public)?.GetValue(obj2);
+			return obj3?.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public)?.GetValue(obj3);
 		}
 		catch
 		{
@@ -3375,35 +3285,31 @@ public class Plugin : BaseUnityPlugin
 			object obj = null;
 			if (type != null)
 			{
-				PropertyInfo property = type.GetProperty("main", BindingFlags.Static | BindingFlags.Public);
-				obj = property?.GetValue(null);
+				obj = type.GetProperty("main", BindingFlags.Static | BindingFlags.Public)?.GetValue(null);
 			}
-			PropertyInfo property2 = gameObject.GetType().GetProperty("transform", BindingFlags.Instance | BindingFlags.Public);
-			object value = property2?.GetValue(gameObject);
-			if (value == null)
-			{
-				return false;
-			}
-			PropertyInfo property3 = value.GetType().GetProperty("position", BindingFlags.Instance | BindingFlags.Public);
-			object value2 = property3?.GetValue(value);
-			if (value2 == null || obj == null || type == null)
-			{
-				return false;
-			}
-			MethodInfo method = type.GetMethod("WorldToScreenPoint", new Type[1] { value2.GetType() });
-			object obj2 = method?.Invoke(obj, new object[1] { value2 });
+			object obj2 = gameObject.GetType().GetProperty("transform", BindingFlags.Instance | BindingFlags.Public)?.GetValue(gameObject);
 			if (obj2 == null)
 			{
 				return false;
 			}
-			PropertyInfo property4 = obj2.GetType().GetProperty("x");
-			PropertyInfo property5 = obj2.GetType().GetProperty("y");
-			if (property4 == null || property5 == null)
+			object obj3 = obj2.GetType().GetProperty("position", BindingFlags.Instance | BindingFlags.Public)?.GetValue(obj2);
+			if (obj3 == null || obj == null || type == null)
 			{
 				return false;
 			}
-			x = Convert.ToSingle(property4.GetValue(obj2));
-			y = Convert.ToSingle(property5.GetValue(obj2));
+			object obj4 = type.GetMethod("WorldToScreenPoint", new Type[1] { obj3.GetType() })?.Invoke(obj, new object[1] { obj3 });
+			if (obj4 == null)
+			{
+				return false;
+			}
+			PropertyInfo property = obj4.GetType().GetProperty("x");
+			PropertyInfo property2 = obj4.GetType().GetProperty("y");
+			if (property == null || property2 == null)
+			{
+				return false;
+			}
+			x = Convert.ToSingle(property.GetValue(obj4));
+			y = Convert.ToSingle(property2.GetValue(obj4));
 			return true;
 		}
 		catch
@@ -3429,20 +3335,14 @@ public class Plugin : BaseUnityPlugin
 			float num = float.MaxValue;
 			foreach (OptionItem optionItem2 in texts)
 			{
-				if (optionItem2 == null)
+				if (optionItem2 != null && !IsWeakSettingName(CleanSettingName(optionItem2.Text)))
 				{
-					continue;
-				}
-				string text2 = CleanSettingName(optionItem2.Text);
-				if (IsWeakSettingName(text2))
-				{
-					continue;
-				}
-				float num2 = Math.Abs(optionItem2.ScreenY - setting.ScreenY);
-				if (num2 < num)
-				{
-					num = num2;
-					optionItem = optionItem2;
+					float num2 = Math.Abs(optionItem2.ScreenY - setting.ScreenY);
+					if (num2 < num)
+					{
+						num = num2;
+						optionItem = optionItem2;
+					}
 				}
 			}
 			if (optionItem != null && num < 80f)
@@ -3450,17 +3350,13 @@ public class Plugin : BaseUnityPlugin
 				return CleanSettingName(optionItem.Text);
 			}
 		}
-		switch (setting.Type)
+		return setting.Type switch
 		{
-		case SettingItem.SettingType.Slider:
-			return "滑块";
-		case SettingItem.SettingType.Toggle:
-			return "开关";
-		case SettingItem.SettingType.Dropdown:
-			return "选项";
-		default:
-			return "设置项";
-		}
+			SettingItem.SettingType.Slider => "滑块", 
+			SettingItem.SettingType.Toggle => "开关", 
+			SettingItem.SettingType.Dropdown => "选项", 
+			_ => "设置项", 
+		};
 	}
 
 	private static string CleanSettingName(string name)
@@ -3472,7 +3368,8 @@ public class Plugin : BaseUnityPlugin
 		string text = name.Trim();
 		string[] array = new string[12]
 		{
-			"开启", "关闭", "打开", "关", "开", "ON", "OFF", "On", "Off", "%", "％", "："
+			"开启", "关闭", "打开", "关", "开", "ON", "OFF", "On", "Off", "%",
+			"％", "："
 		};
 		foreach (string oldValue in array)
 		{
@@ -3488,19 +3385,37 @@ public class Plugin : BaseUnityPlugin
 			return true;
 		}
 		string text = name.Trim();
-		return text.Length <= 1 || text == "开启" || text == "关闭" || text == "打开" || text == "开" || text == "关" || text == "ON" || text == "OFF" || text.EndsWith("%") || text.EndsWith("％");
+		if (text.Length > 1)
+		{
+			switch (text)
+			{
+			default:
+				if (!text.EndsWith("%"))
+				{
+					return text.EndsWith("％");
+				}
+				break;
+			case "开启":
+			case "关闭":
+			case "打开":
+			case "开":
+			case "关":
+			case "ON":
+			case "OFF":
+				break;
+			}
+		}
+		return true;
 	}
 
 	private static string GetDropdownOptionText(object options, int index)
 	{
 		try
 		{
-			PropertyInfo property = options.GetType().GetProperty("Item");
-			object value = property?.GetValue(options, new object[1] { index });
-			if (value != null)
+			object obj = options.GetType().GetProperty("Item")?.GetValue(options, new object[1] { index });
+			if (obj != null)
 			{
-				PropertyInfo property2 = value.GetType().GetProperty("text");
-				string text = property2?.GetValue(value) as string;
+				string text = obj.GetType().GetProperty("text")?.GetValue(obj) as string;
 				if (!string.IsNullOrWhiteSpace(text))
 				{
 					return text.Trim();
@@ -3562,20 +3477,20 @@ public class Plugin : BaseUnityPlugin
 			{
 			case SettingItem.SettingType.Slider:
 			{
-				PropertyInfo property = item.Component.GetType().GetProperty("value");
-				if (property != null)
-				{
-					item.Value = Convert.ToSingle(property.GetValue(item.Component));
-				}
-				PropertyInfo property2 = item.Component.GetType().GetProperty("minValue");
+				PropertyInfo property2 = item.Component.GetType().GetProperty("value");
 				if (property2 != null)
 				{
-					item.MinValue = Convert.ToSingle(property2.GetValue(item.Component));
+					item.Value = Convert.ToSingle(property2.GetValue(item.Component));
 				}
-				PropertyInfo property3 = item.Component.GetType().GetProperty("maxValue");
+				PropertyInfo property3 = item.Component.GetType().GetProperty("minValue");
 				if (property3 != null)
 				{
-					item.MaxValue = Convert.ToSingle(property3.GetValue(item.Component));
+					item.MinValue = Convert.ToSingle(property3.GetValue(item.Component));
+				}
+				PropertyInfo property4 = item.Component.GetType().GetProperty("maxValue");
+				if (property4 != null)
+				{
+					item.MaxValue = Convert.ToSingle(property4.GetValue(item.Component));
 				}
 				break;
 			}
@@ -3590,10 +3505,10 @@ public class Plugin : BaseUnityPlugin
 			}
 			case SettingItem.SettingType.Dropdown:
 			{
-				PropertyInfo property4 = item.Component.GetType().GetProperty("value");
-				if (property4 != null)
+				PropertyInfo property = item.Component.GetType().GetProperty("value");
+				if (property != null)
 				{
-					item.SelectedIndex = (int)property4.GetValue(item.Component);
+					item.SelectedIndex = (int)property.GetValue(item.Component);
 				}
 				break;
 			}
@@ -3623,8 +3538,7 @@ public class Plugin : BaseUnityPlugin
 		SettingItem settingItem = _settings[_currentSettingIndex];
 		string settingValueText = GetSettingValueText(settingItem);
 		PlayGameSound("Highlight");
-		string text2 = string.IsNullOrWhiteSpace(settingValueText) ? settingItem.Name : (settingItem.Name + " " + settingValueText);
-		TolkHelper.Speak(text2, interrupt: true);
+		TolkHelper.Speak(string.IsNullOrWhiteSpace(settingValueText) ? settingItem.Name : (settingItem.Name + " " + settingValueText), interrupt: true);
 	}
 
 	private static bool ActivateCurrentSetting()
@@ -3658,8 +3572,8 @@ public class Plugin : BaseUnityPlugin
 					SpeakCurrentSetting();
 					return true;
 				}
-				object component = settingItem.ClickComponent ?? settingItem.Component;
-				if (component != null && ClickComponent(component))
+				object obj = settingItem.ClickComponent ?? settingItem.Component;
+				if (obj != null && ClickComponent(obj))
 				{
 					PlayGameSound((settingItem.Type == SettingItem.SettingType.Button && (settingItem.Name == "返回" || settingItem.Name == "Back" || settingItem.Name == "关闭")) ? "Back" : "Click");
 					Thread.Sleep(50);
@@ -3719,7 +3633,7 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			int num = item.SelectedIndex == 0 ? 1 : 0;
+			int num = ((item.SelectedIndex == 0) ? 1 : 0);
 			PropertyInfo property = item.Component.GetType().GetProperty("value");
 			if (property == null || !property.CanWrite)
 			{
@@ -3766,8 +3680,7 @@ public class Plugin : BaseUnityPlugin
 			Type type = Type.GetType("UnityEngine.SceneManagement.SceneManager, UnityEngine.CoreModule");
 			if (type != null)
 			{
-				MethodInfo method = type.GetMethod("UnloadSceneAsync", new Type[1] { typeof(string) });
-				method?.Invoke(null, new object[1] { "Settings" });
+				type.GetMethod("UnloadSceneAsync", new Type[1] { typeof(string) })?.Invoke(null, new object[1] { "Settings" });
 				Log.LogInfo((object)"[设置] 已请求卸载 Settings 场景");
 			}
 		}
@@ -3791,12 +3704,11 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			PropertyInfo property = component.GetType().GetProperty("onValueChanged");
-			object obj = property?.GetValue(component);
-			MethodInfo method = obj?.GetType().GetMethod("Invoke");
-			if (method != null)
+			object obj = component.GetType().GetProperty("onValueChanged")?.GetValue(component);
+			MethodInfo methodInfo = obj?.GetType().GetMethod("Invoke");
+			if (methodInfo != null)
 			{
-				method.Invoke(obj, new object[1] { value });
+				methodInfo.Invoke(obj, new object[1] { value });
 			}
 		}
 		catch (Exception ex)
@@ -3817,47 +3729,43 @@ public class Plugin : BaseUnityPlugin
 			{
 			case SettingItem.SettingType.Slider:
 			{
-				Type type2 = Type.GetType("UnityEngine.UI.Slider, UnityEngine.UI");
-				if (!(type2 != null))
+				Type type = Type.GetType("UnityEngine.UI.Slider, UnityEngine.UI");
+				if (!(type != null))
 				{
 					break;
 				}
-				PropertyInfo property3 = type2.GetProperty("value");
-				if (!(property3 != null))
+				PropertyInfo property2 = type.GetProperty("value");
+				if (property2 != null)
 				{
-					break;
+					float num = (item.MaxValue - item.MinValue) / 10f;
+					float val3 = item.Value + (float)direction * num;
+					val3 = Math.Max(item.MinValue, Math.Min(val3, item.MaxValue));
+					if (Math.Abs(val3 - item.Value) > 0.001f)
+					{
+						PlayGameSound("Highlight");
+					}
+					property2.SetValue(item.Component, val3);
+					item.Value = val3;
+					InvokeValueChanged(item.Component, val3);
 				}
-				float num = (item.MaxValue - item.MinValue) / 10f;
-				float val3 = item.Value + (float)direction * num;
-				val3 = Math.Max(item.MinValue, Math.Min(val3, item.MaxValue));
-				if (Math.Abs(val3 - item.Value) > 0.001f)
-				{
-					PlayGameSound("Highlight");
-				}
-				property3.SetValue(item.Component, val3);
-				item.Value = val3;
-				InvokeValueChanged(item.Component, val3);
 				break;
 			}
 			case SettingItem.SettingType.Dropdown:
 			{
-				Type type = item.Component.GetType();
-				PropertyInfo property = type.GetProperty("value");
-				if (!(property != null))
+				PropertyInfo property = item.Component.GetType().GetProperty("value");
+				if (property != null)
 				{
-					break;
+					int val = item.SelectedIndex + direction;
+					int val2 = ((item.Options != null) ? (item.Options.Length - 1) : 10);
+					val = Math.Max(0, Math.Min(val, val2));
+					if (val != item.SelectedIndex)
+					{
+						PlayGameSound("Highlight");
+						property.SetValue(item.Component, val);
+						item.SelectedIndex = val;
+						InvokeValueChanged(item.Component, val);
+					}
 				}
-				int val = item.SelectedIndex + direction;
-				int val2 = ((item.Options != null) ? (item.Options.Length - 1) : 10);
-				val = Math.Max(0, Math.Min(val, val2));
-				if (val == item.SelectedIndex)
-				{
-					break;
-				}
-				PlayGameSound("Highlight");
-				property.SetValue(item.Component, val);
-				item.SelectedIndex = val;
-				InvokeValueChanged(item.Component, val);
 				break;
 			}
 			case SettingItem.SettingType.Toggle:
@@ -3936,27 +3844,26 @@ public class Plugin : BaseUnityPlugin
 			}
 			foreach (object item in array)
 			{
-				if (!IsComponentActiveInHierarchy(item))
+				if (IsComponentActiveInHierarchy(item))
 				{
-					continue;
-				}
-				List<OptionItem> list = new List<OptionItem>();
-				string text = BuildEndingPageText(item);
-				if (!string.IsNullOrWhiteSpace(text))
-				{
-					list.Add(new OptionItem
+					List<OptionItem> list = new List<OptionItem>();
+					string text = BuildEndingPageText(item);
+					if (!string.IsNullOrWhiteSpace(text))
 					{
-						Text = "结尾提示：" + text,
-						Index = -1
-					});
-				}
-				AddEndingButtonOption(list, item, "returnToMainButton", "返回故事线", ENDING_ACTION_RETURN_STORYLINE);
-				AddEndingButtonOption(list, item, "gotoStorylineButton", "前往故事线", ENDING_ACTION_GOTO_STORYLINE);
-				AddFallbackEndingButtonOptions(list, item);
-				if (list.Count > 0)
-				{
-					Log.LogInfo((object)$"[结尾页] 检测到 {list.Count} 个可读项");
-					return list.ToArray();
+						list.Add(new OptionItem
+						{
+							Text = "结尾提示：" + text,
+							Index = -1
+						});
+					}
+					AddEndingButtonOption(list, item, "returnToMainButton", "返回故事线", -9001);
+					AddEndingButtonOption(list, item, "gotoStorylineButton", "前往故事线", -9002);
+					AddFallbackEndingButtonOptions(list, item);
+					if (list.Count > 0)
+					{
+						Log.LogInfo((object)$"[结尾页] 检测到 {list.Count} 个可读项");
+						return list.ToArray();
+					}
 				}
 			}
 			return new OptionItem[0];
@@ -3970,16 +3877,16 @@ public class Plugin : BaseUnityPlugin
 
 	private static string BuildEndingPageText(object endingController)
 	{
-		string text = GetTextComponentText(GetFieldValue(endingController, "endingTitleText"));
-		string text2 = GetTextComponentText(GetFieldValue(endingController, "endingDescriptionText"));
+		string textComponentText = GetTextComponentText(GetFieldValue(endingController, "endingTitleText"));
+		string textComponentText2 = GetTextComponentText(GetFieldValue(endingController, "endingDescriptionText"));
 		List<string> list = new List<string>();
-		if (!string.IsNullOrWhiteSpace(text))
+		if (!string.IsNullOrWhiteSpace(textComponentText))
 		{
-			list.Add(NormalizeReadableText(text));
+			list.Add(NormalizeReadableText(textComponentText));
 		}
-		if (!string.IsNullOrWhiteSpace(text2) && !string.Equals(text.Trim(), text2.Trim(), StringComparison.Ordinal))
+		if (!string.IsNullOrWhiteSpace(textComponentText2) && !string.Equals(textComponentText.Trim(), textComponentText2.Trim(), StringComparison.Ordinal))
 		{
-			list.Add(NormalizeReadableText(text2));
+			list.Add(NormalizeReadableText(textComponentText2));
 		}
 		return string.Join("。", list.Where((string s) => !string.IsNullOrWhiteSpace(s)));
 	}
@@ -3991,21 +3898,20 @@ public class Plugin : BaseUnityPlugin
 			return;
 		}
 		object fieldValue = GetFieldValue(endingController, fieldName);
-		if (fieldValue == null)
+		if (fieldValue != null)
 		{
-			return;
+			string text = GetButtonText(fieldValue);
+			if (string.IsNullOrWhiteSpace(text))
+			{
+				text = fallbackText;
+			}
+			list.Add(new OptionItem
+			{
+				Text = NormalizeReadableText(text),
+				ClickableComponent = endingController,
+				Index = actionIndex
+			});
 		}
-		string text = GetButtonText(fieldValue);
-		if (string.IsNullOrWhiteSpace(text))
-		{
-			text = fallbackText;
-		}
-		list.Add(new OptionItem
-		{
-			Text = NormalizeReadableText(text),
-			ClickableComponent = endingController,
-			Index = actionIndex
-		});
 	}
 
 	private static void AddFallbackEndingButtonOptions(List<OptionItem> list, object endingController)
@@ -4024,26 +3930,24 @@ public class Plugin : BaseUnityPlugin
 					continue;
 				}
 				object value = fieldInfo.GetValue(endingController);
-				if (value == null)
+				if (value != null)
 				{
-					continue;
+					string text = NormalizeReadableText(GetButtonText(value));
+					if (string.IsNullOrWhiteSpace(text))
+					{
+						text = GuessEndingButtonName(fieldInfo.Name);
+					}
+					if (!string.IsNullOrWhiteSpace(text) && !ContainsOptionText(list, text))
+					{
+						list.Add(new OptionItem
+						{
+							Text = text,
+							ClickableComponent = value,
+							Index = list.Count
+						});
+						Log.LogInfo((object)("[结尾页] 兜底加入按钮: " + fieldInfo.Name + " -> " + text));
+					}
 				}
-				string text = NormalizeReadableText(GetButtonText(value));
-				if (string.IsNullOrWhiteSpace(text))
-				{
-					text = GuessEndingButtonName(fieldInfo.Name);
-				}
-				if (string.IsNullOrWhiteSpace(text) || ContainsOptionText(list, text))
-				{
-					continue;
-				}
-				list.Add(new OptionItem
-				{
-					Text = text,
-					ClickableComponent = value,
-					Index = list.Count
-				});
-				Log.LogInfo((object)("[结尾页] 兜底加入按钮: " + fieldInfo.Name + " -> " + text));
 			}
 		}
 		catch (Exception ex)
@@ -4093,8 +3997,7 @@ public class Plugin : BaseUnityPlugin
 			{
 				return "";
 			}
-			PropertyInfo property = textComponent.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public);
-			return property?.GetValue(textComponent) as string ?? "";
+			return (textComponent.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public)?.GetValue(textComponent) as string) ?? "";
 		}
 		catch
 		{
@@ -4143,7 +4046,8 @@ public class Plugin : BaseUnityPlugin
 		{
 			return "";
 		}
-		return text.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ").Trim();
+		return text.Replace("\r", " ").Replace("\n", " ").Replace("\t", " ")
+			.Trim();
 	}
 
 	private static void ResolveStorylineTypes()
@@ -4240,41 +4144,41 @@ public class Plugin : BaseUnityPlugin
 				return false;
 			}
 			PropertyInfo property = _storylineUIManagerType.GetProperty("IsStorylineDisplayActive", BindingFlags.Instance | BindingFlags.Public);
-			FieldInfo chapterPanelField = _storylineUIManagerType.GetField("chapterSelectionPanel", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-			FieldInfo displayPanelField = _storylineUIManagerType.GetField("storylineDisplayPanel", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-			FieldInfo mainMenuToggleField = _storylineUIManagerType.GetField("mainMenuToggleHide", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+			FieldInfo field = _storylineUIManagerType.GetField("chapterSelectionPanel", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+			FieldInfo field2 = _storylineUIManagerType.GetField("storylineDisplayPanel", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+			FieldInfo field3 = _storylineUIManagerType.GetField("mainMenuToggleHide", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 			foreach (object item in array)
 			{
 				try
 				{
-					if (IsToggleHideGameObjectActive(mainMenuToggleField?.GetValue(item)))
+					if (IsToggleHideGameObjectActive(field3?.GetValue(item)))
 					{
-						ManualLogSource log0 = Log;
-						if (log0 != null)
+						ManualLogSource log = Log;
+						if (log != null)
 						{
-							log0.LogDebug((object)"[Storyline detection] main menu active");
+							log.LogDebug((object)"[Storyline detection] main menu active");
 						}
 						return false;
 					}
 					if (property != null && (bool)property.GetValue(item))
 					{
-						ManualLogSource log = Log;
-						if (log != null)
-						{
-							log.LogDebug((object)"[Storyline detection] display panel active");
-						}
-						return true;
-					}
-					if (IsGameObjectActiveInHierarchy(displayPanelField?.GetValue(item)))
-					{
 						ManualLogSource log2 = Log;
 						if (log2 != null)
 						{
-							log2.LogDebug((object)"[Storyline detection] display object active");
+							log2.LogDebug((object)"[Storyline detection] display panel active");
 						}
 						return true;
 					}
-					if (IsGameObjectActiveInHierarchy(chapterPanelField?.GetValue(item)))
+					if (IsGameObjectActiveInHierarchy(field2?.GetValue(item)))
+					{
+						ManualLogSource log3 = Log;
+						if (log3 != null)
+						{
+							log3.LogDebug((object)"[Storyline detection] display object active");
+						}
+						return true;
+					}
+					if (IsGameObjectActiveInHierarchy(field?.GetValue(item)))
 					{
 						ManualLogSource log4 = Log;
 						if (log4 != null)
@@ -4288,10 +4192,10 @@ public class Plugin : BaseUnityPlugin
 				{
 				}
 			}
-			ManualLogSource log3 = Log;
-			if (log3 != null)
+			ManualLogSource log5 = Log;
+			if (log5 != null)
 			{
-				log3.LogDebug((object)"[Storyline detection] panels inactive");
+				log5.LogDebug((object)"[Storyline detection] panels inactive");
 			}
 			return false;
 		}
@@ -4327,14 +4231,14 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			PropertyInfo gameObjectProperty = toggleHide.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
-			return IsGameObjectActiveInHierarchy(gameObjectProperty?.GetValue(toggleHide));
+			return IsGameObjectActiveInHierarchy(toggleHide.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public)?.GetValue(toggleHide));
 		}
 		catch
 		{
 			return false;
 		}
 	}
+
 	private static ChapterInfo[] GetStorylineChapters()
 	{
 		try
@@ -4530,15 +4434,12 @@ public class Plugin : BaseUnityPlugin
 		{
 			return text;
 		}
-		if (chapterNumber == 1)
+		return chapterNumber switch
 		{
-			return "序章";
-		}
-		if (chapterNumber == 6)
-		{
-			return "终章";
-		}
-		return $"第{chapterNumber - 1}章";
+			1 => "序章", 
+			6 => "终章", 
+			_ => $"第{chapterNumber - 1}章", 
+		};
 	}
 
 	private static string GetFallbackChapterName(int chapterNumber)
@@ -4588,23 +4489,23 @@ public class Plugin : BaseUnityPlugin
 		}
 		ClearNodeMode("Enter storyline chapter selection");
 		List<OptionItem> list = new List<OptionItem>();
-		ChapterInfo[] array = storylineChapters;
-		ChapterInfo[] array2 = array;
-			foreach (ChapterInfo chapterInfo in array2.OrderBy((ChapterInfo c) => c.ChapterNumber).ThenBy((ChapterInfo c) => c.Index))
+		foreach (ChapterInfo item in from c in storylineChapters
+			orderby c.ChapterNumber, c.Index
+			select c)
 		{
 			OptionItem optionItem = new OptionItem();
-			string text = FormatStorylineChapterOptionText(chapterInfo);
-			if (chapterInfo.IsLocked)
+			string text = FormatStorylineChapterOptionText(item);
+			if (item.IsLocked)
 			{
 				text += "（已锁定）";
 			}
-			else if (!string.IsNullOrEmpty(chapterInfo.ProgressText))
+			else if (!string.IsNullOrEmpty(item.ProgressText))
 			{
-				text = text + "（进度 " + chapterInfo.ProgressText + "）";
+				text = text + "（进度 " + item.ProgressText + "）";
 			}
 			optionItem.Text = text;
-			optionItem.ClickableComponent = chapterInfo.ButtonComponent;
-			optionItem.ChapterInfo = chapterInfo;
+			optionItem.ClickableComponent = item.ButtonComponent;
+			optionItem.ChapterInfo = item;
 			list.Add(optionItem);
 		}
 		_inStorylineMode = true;
@@ -4784,8 +4685,8 @@ public class Plugin : BaseUnityPlugin
 			HashSet<string> hashSet = new HashSet<string>();
 			Dictionary<int, int> dictionary = new Dictionary<int, int>();
 			Dictionary<int, int> dictionary2 = new Dictionary<int, int>();
-			int num4 = 0;
-			int num5 = 0;
+			int num = 0;
+			int num2 = 0;
 			for (int i = 0; i < array.Length; i++)
 			{
 				object value = array.GetValue(i);
@@ -4806,38 +4707,38 @@ public class Plugin : BaseUnityPlugin
 						FieldInfo field2 = type.GetField("nodeId", BindingFlags.Instance | BindingFlags.Public);
 						FieldInfo field3 = type.GetField("overall", BindingFlags.Instance | BindingFlags.Public);
 						FieldInfo field4 = type.GetField("chapterNumber", BindingFlags.Instance | BindingFlags.Public);
-						FieldInfo layoutLayerField = type.GetField("layoutLayer", BindingFlags.Instance | BindingFlags.Public);
-						FieldInfo layoutOrderField = type.GetField("layoutOrder", BindingFlags.Instance | BindingFlags.Public);
+						FieldInfo field5 = type.GetField("layoutLayer", BindingFlags.Instance | BindingFlags.Public);
+						FieldInfo field6 = type.GetField("layoutOrder", BindingFlags.Instance | BindingFlags.Public);
 						string text = ((field2 != null) ? ((string)field2.GetValue(value2)) : $"节点{i + 1}");
 						string text2 = ((field3 != null) ? ((string)field3.GetValue(value2)) : "");
-						int num = ((field4 != null) ? ((int)field4.GetValue(value2)) : 0);
-						if (!dictionary.ContainsKey(num))
+						int num3 = ((field4 != null) ? ((int)field4.GetValue(value2)) : 0);
+						if (!dictionary.ContainsKey(num3))
 						{
-							dictionary[num] = 0;
+							dictionary[num3] = 0;
 						}
-						dictionary[num]++;
-						if (currentStorylineChapterFilter > 0 && num > 0 && num != currentStorylineChapterFilter)
+						dictionary[num3]++;
+						if (currentStorylineChapterFilter > 0 && num3 > 0 && num3 != currentStorylineChapterFilter)
 						{
-							num4++;
-							Log.LogInfo((object)$"[故事线过滤] 跳过其他章节节点: {text}, chapter={num}, current={currentStorylineChapterFilter}");
+							num++;
+							Log.LogInfo((object)$"[故事线过滤] 跳过其他章节节点: {text}, chapter={num3}, current={currentStorylineChapterFilter}");
 							continue;
 						}
-						string text3 = string.IsNullOrWhiteSpace(text) ? $"component_{i}" : text.Trim();
+						string text3 = (string.IsNullOrWhiteSpace(text) ? $"component_{i}" : text.Trim());
 						if (!hashSet.Add(text3))
 						{
-							num5++;
+							num2++;
 							Log.LogInfo((object)("[故事线过滤] 跳过重复节点: " + text3));
 							continue;
 						}
-						if (!dictionary2.ContainsKey(num))
+						if (!dictionary2.ContainsKey(num3))
 						{
-							dictionary2[num] = 0;
+							dictionary2[num3] = 0;
 						}
-						dictionary2[num]++;
-						int num2 = ((layoutLayerField != null) ? ((int)layoutLayerField.GetValue(value2)) : 0);
-						int num3 = ((layoutOrderField != null) ? ((int)layoutOrderField.GetValue(value2)) : 0);
+						dictionary2[num3]++;
+						int num4 = ((field5 != null) ? ((int)field5.GetValue(value2)) : 0);
+						int num5 = ((field6 != null) ? ((int)field6.GetValue(value2)) : 0);
 						optionItem.NodeId = text;
-						optionItem.Index = BuildStorylineNodeSortKey(num, num2, num3, i);
+						optionItem.Index = BuildStorylineNodeSortKey(num3, num4, num5, i);
 						if (!string.IsNullOrEmpty(text2))
 						{
 							optionItem.Text = text2;
@@ -4858,19 +4759,19 @@ public class Plugin : BaseUnityPlugin
 									if (value3 != null)
 									{
 										Type type3 = value3.GetType();
-										PropertyInfo property2 = type3.GetProperty("localPosition") ?? type3.GetProperty("position");
-										if (property2 != null)
+										PropertyInfo propertyInfo = type3.GetProperty("localPosition") ?? type3.GetProperty("position");
+										if (propertyInfo != null)
 										{
-											object value4 = property2.GetValue(value3);
+											object value4 = propertyInfo.GetValue(value3);
 											if (value4 != null)
 											{
 												Type type4 = value4.GetType();
-												FieldInfo field5 = type4.GetField("y");
-												FieldInfo field6 = type4.GetField("x");
-												if (field5 != null && field6 != null)
+												FieldInfo field7 = type4.GetField("y");
+												FieldInfo field8 = type4.GetField("x");
+												if (field7 != null && field8 != null)
 												{
-													optionItem.ScreenY = (float)field5.GetValue(value4);
-													optionItem.ScreenX = (float)field6.GetValue(value4);
+													optionItem.ScreenY = (float)field7.GetValue(value4);
+													optionItem.ScreenX = (float)field8.GetValue(value4);
 													optionItem.HasScreenPosition = true;
 												}
 											}
@@ -4882,7 +4783,7 @@ public class Plugin : BaseUnityPlugin
 						catch
 						{
 						}
-						Log.LogInfo((object)$"[故事线排序] 节点={text}, chapter={num}, layer={num2}, order={num3}, key={optionItem.Index}, pos=({optionItem.ScreenX:F1},{optionItem.ScreenY:F1}), hasPos={optionItem.HasScreenPosition}");
+						Log.LogInfo((object)$"[故事线排序] 节点={text}, chapter={num3}, layer={num4}, order={num5}, key={optionItem.Index}, pos=({optionItem.ScreenX:F1},{optionItem.ScreenY:F1}), hasPos={optionItem.HasScreenPosition}");
 					}
 				}
 				if (string.IsNullOrEmpty(optionItem.Text))
@@ -4896,57 +4797,61 @@ public class Plugin : BaseUnityPlugin
 			}
 			LogStorylineNodeChapterSummary("原始", dictionary);
 			LogStorylineNodeChapterSummary("过滤后", dictionary2);
-			Log.LogInfo((object)$"[故事线过滤] 混入其他章节 {num4} 个，重复节点 {num5} 个");
+			Log.LogInfo((object)$"[故事线过滤] 混入其他章节 {num} 个，重复节点 {num2} 个");
 			Log.LogInfo((object)$"[故事线过滤] 过滤后剩余 {list.Count} 个节点");
 			Dictionary<string, int> officialNodeOrder = GetStorylinePrecomputedNodeOrder(currentStorylineChapterFilter);
 			Log.LogInfo((object)$"[故事线排序] 官方预计算顺序: {officialNodeOrder.Count} 个");
 			bool hasRenderPosition = list.Any((OptionItem o) => o.HasScreenPosition);
 			list.Sort(delegate(OptionItem a, OptionItem b)
 			{
-				int value = 0;
-				int value2 = 0;
-				bool flag = !string.IsNullOrWhiteSpace(a.NodeId) && officialNodeOrder.TryGetValue(a.NodeId.Trim(), out value);
-				bool flag2 = !string.IsNullOrWhiteSpace(b.NodeId) && officialNodeOrder.TryGetValue(b.NodeId.Trim(), out value2);
+				int value5 = 0;
+				int value6 = 0;
+				bool flag = !string.IsNullOrWhiteSpace(a.NodeId) && officialNodeOrder.TryGetValue(a.NodeId.Trim(), out value5);
+				bool flag2 = !string.IsNullOrWhiteSpace(b.NodeId) && officialNodeOrder.TryGetValue(b.NodeId.Trim(), out value6);
 				if (flag != flag2)
 				{
-					return flag ? -1 : 1;
+					if (!flag)
+					{
+						return 1;
+					}
+					return -1;
 				}
 				if (flag && flag2)
 				{
-					int num2 = value.CompareTo(value2);
-					if (num2 != 0)
+					int num6 = value5.CompareTo(value6);
+					if (num6 != 0)
 					{
-						return num2;
+						return num6;
 					}
 				}
-				int num3 = CompareStorylineNodeId(a.NodeId, b.NodeId);
-				if (num3 != 0)
+				int num7 = CompareStorylineNodeId(a.NodeId, b.NodeId);
+				if (num7 != 0)
 				{
-					return num3;
+					return num7;
 				}
 				if (hasRenderPosition)
 				{
 					if (a.HasScreenPosition != b.HasScreenPosition)
 					{
-						return a.HasScreenPosition ? -1 : 1;
+						if (!a.HasScreenPosition)
+						{
+							return 1;
+						}
+						return -1;
 					}
-					int num4 = GetStorylineColumnSortKey(a.ScreenX).CompareTo(GetStorylineColumnSortKey(b.ScreenX));
-					if (num4 != 0)
+					int num8 = GetStorylineColumnSortKey(a.ScreenX).CompareTo(GetStorylineColumnSortKey(b.ScreenX));
+					if (num8 != 0)
 					{
-						return num4;
+						return num8;
 					}
-					int num5 = b.ScreenY.CompareTo(a.ScreenY);
-					if (num5 != 0)
+					int num9 = b.ScreenY.CompareTo(a.ScreenY);
+					if (num9 != 0)
 					{
-						return num5;
+						return num9;
 					}
 				}
-				int num6 = a.Index.CompareTo(b.Index);
-				if (num6 != 0)
-				{
-					return num6;
-				}
-				return string.Compare(a.Text, b.Text, StringComparison.Ordinal);
+				int num10 = a.Index.CompareTo(b.Index);
+				return (num10 != 0) ? num10 : string.Compare(a.Text, b.Text, StringComparison.Ordinal);
 			});
 			LogStorylineFinalOrder(list, officialNodeOrder);
 			return list.ToArray();
@@ -4982,22 +4887,14 @@ public class Plugin : BaseUnityPlugin
 				return 0;
 			}
 			MethodInfo method = _progressTreeGraphControllerType.GetMethod("GetCurrentChapterFilter", BindingFlags.Instance | BindingFlags.Public);
-			if (method != null)
+			if (method != null && method.Invoke(activeObject, null) is int result)
 			{
-				object obj = method.Invoke(activeObject, null);
-				if (obj is int num)
-				{
-					return num;
-				}
+				return result;
 			}
-			FieldInfo field = _progressTreeGraphControllerType.GetField("currentChapterFilter", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-			if (field != null)
+			FieldInfo field = _progressTreeGraphControllerType.GetField("currentChapterFilter", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+			if (field != null && field.GetValue(activeObject) is int result2)
 			{
-				object obj2 = field.GetValue(activeObject);
-				if (obj2 is int num2)
-				{
-					return num2;
-				}
+				return result2;
 			}
 		}
 		catch (Exception ex)
@@ -5022,27 +4919,24 @@ public class Plugin : BaseUnityPlugin
 			{
 				return dictionary;
 			}
-			FieldInfo field = _progressTreeGraphControllerType.GetField("precomputedData", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
-			object value = field?.GetValue(activeObject);
-			if (value == null)
+			object obj = _progressTreeGraphControllerType.GetField("precomputedData", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(activeObject);
+			if (obj == null)
 			{
 				Log.LogInfo((object)"[故事线排序] 未取得 precomputedData，使用节点编号排序");
 				return dictionary;
 			}
-			MethodInfo method = value.GetType().GetMethod("GetChapterNodeIds", BindingFlags.Instance | BindingFlags.Public);
-			object obj = null;
+			MethodInfo method = obj.GetType().GetMethod("GetChapterNodeIds", BindingFlags.Instance | BindingFlags.Public);
+			object nodeIdsObject = null;
 			if (method != null && chapterNumber > 0)
 			{
-				obj = method.Invoke(value, new object[1] { chapterNumber });
+				nodeIdsObject = method.Invoke(obj, new object[1] { chapterNumber });
 			}
-			int num = AddStorylineOrderEntries(dictionary, obj, 0);
-			if (num > 0)
+			if (AddStorylineOrderEntries(dictionary, nodeIdsObject, 0) > 0)
 			{
 				return dictionary;
 			}
-			PropertyInfo property = value.GetType().GetProperty("NodePositions", BindingFlags.Instance | BindingFlags.Public);
-			object value2 = property?.GetValue(value);
-			AddStorylineNodePositionOrderEntries(dictionary, value2, chapterNumber);
+			object nodePositionsObject = obj.GetType().GetProperty("NodePositions", BindingFlags.Instance | BindingFlags.Public)?.GetValue(obj);
+			AddStorylineNodePositionOrderEntries(dictionary, nodePositionsObject, chapterNumber);
 		}
 		catch (Exception ex)
 		{
@@ -5058,18 +4952,17 @@ public class Plugin : BaseUnityPlugin
 			return 0;
 		}
 		int num = 0;
-		foreach (object item in (System.Collections.IEnumerable)nodeIdsObject)
+		foreach (object item in (IEnumerable)nodeIdsObject)
 		{
 			string text = item as string;
-			if (string.IsNullOrWhiteSpace(text))
+			if (!string.IsNullOrWhiteSpace(text))
 			{
-				continue;
-			}
-			text = text.Trim();
-			if (!order.ContainsKey(text))
-			{
-				order[text] = startIndex + num;
-				num++;
+				text = text.Trim();
+				if (!order.ContainsKey(text))
+				{
+					order[text] = startIndex + num;
+					num++;
+				}
 			}
 		}
 		return num;
@@ -5082,7 +4975,7 @@ public class Plugin : BaseUnityPlugin
 			return;
 		}
 		int num = order.Count;
-		foreach (object item in (System.Collections.IEnumerable)nodePositionsObject)
+		foreach (object item in (IEnumerable)nodePositionsObject)
 		{
 			if (item == null)
 			{
@@ -5094,17 +4987,15 @@ public class Plugin : BaseUnityPlugin
 			{
 				continue;
 			}
-			FieldInfo field2 = type.GetField("nodeId", BindingFlags.Instance | BindingFlags.Public);
-			string text = field2?.GetValue(item) as string;
-			if (string.IsNullOrWhiteSpace(text))
+			string text = type.GetField("nodeId", BindingFlags.Instance | BindingFlags.Public)?.GetValue(item) as string;
+			if (!string.IsNullOrWhiteSpace(text))
 			{
-				continue;
-			}
-			text = text.Trim();
-			if (!order.ContainsKey(text))
-			{
-				order[text] = num;
-				num++;
+				text = text.Trim();
+				if (!order.ContainsKey(text))
+				{
+					order[text] = num;
+					num++;
+				}
 			}
 		}
 	}
@@ -5117,20 +5008,20 @@ public class Plugin : BaseUnityPlugin
 			{
 				return;
 			}
-			int count = Math.Min(nodes.Count, 160);
-			for (int i = 0; i < count; i++)
+			int num = Math.Min(nodes.Count, 160);
+			for (int i = 0; i < num; i++)
 			{
 				OptionItem optionItem = nodes[i];
-				int num = -1;
+				int value = -1;
 				if (!string.IsNullOrWhiteSpace(optionItem.NodeId))
 				{
-					officialNodeOrder?.TryGetValue(optionItem.NodeId.Trim(), out num);
+					officialNodeOrder?.TryGetValue(optionItem.NodeId.Trim(), out value);
 				}
-				Log.LogInfo((object)$"[故事线最终排序] {i + 1}/{nodes.Count}: node={optionItem.NodeId}, official={num}, key={optionItem.Index}, pos=({optionItem.ScreenX:F1},{optionItem.ScreenY:F1}), text={optionItem.Text}");
+				Log.LogInfo((object)$"[故事线最终排序] {i + 1}/{nodes.Count}: node={optionItem.NodeId}, official={value}, key={optionItem.Index}, pos=({optionItem.ScreenX:F1},{optionItem.ScreenY:F1}), text={optionItem.Text}");
 			}
-			if (nodes.Count > count)
+			if (nodes.Count > num)
 			{
-				Log.LogInfo((object)$"[故事线最终排序] 仅记录前 {count} 个，共 {nodes.Count} 个");
+				Log.LogInfo((object)$"[故事线最终排序] 仅记录前 {num} 个，共 {nodes.Count} 个");
 			}
 		}
 		catch
@@ -5147,7 +5038,9 @@ public class Plugin : BaseUnityPlugin
 				Log.LogInfo((object)("[故事线统计] " + label + ": 无节点"));
 				return;
 			}
-			string text = string.Join(", ", counts.OrderBy((KeyValuePair<int, int> p) => p.Key).Select((KeyValuePair<int, int> p) => $"第{p.Key}章={p.Value}"));
+			string text = string.Join(", ", from p in counts
+				orderby p.Key
+				select $"第{p.Key}章={p.Value}");
 			Log.LogInfo((object)("[故事线统计] " + label + ": " + text));
 		}
 		catch
@@ -5163,11 +5056,10 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			PropertyInfo property = component.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
-			object value = property?.GetValue(component);
-			if (value != null)
+			object obj = component.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public)?.GetValue(component);
+			if (obj != null)
 			{
-				return IsGameObjectActiveInHierarchy(value);
+				return IsGameObjectActiveInHierarchy(obj);
 			}
 		}
 		catch
@@ -5209,12 +5101,12 @@ public class Plugin : BaseUnityPlugin
 		int num = Math.Max(list.Count, list2.Count);
 		for (int i = 0; i < num; i++)
 		{
-			int num2 = (i < list.Count) ? list[i] : -1;
-			int num3 = (i < list2.Count) ? list2[i] : -1;
-			int num4 = num2.CompareTo(num3);
-			if (num4 != 0)
+			int num2 = ((i < list.Count) ? list[i] : (-1));
+			int value = ((i < list2.Count) ? list2[i] : (-1));
+			int num3 = num2.CompareTo(value);
+			if (num3 != 0)
 			{
-				return num4;
+				return num3;
 			}
 		}
 		return string.Compare(left, right, StringComparison.Ordinal);
@@ -5233,9 +5125,8 @@ public class Plugin : BaseUnityPlugin
 			if (char.IsDigit(c))
 			{
 				stringBuilder.Append(c);
-				continue;
 			}
-			if (stringBuilder.Length > 0)
+			else if (stringBuilder.Length > 0)
 			{
 				if (int.TryParse(stringBuilder.ToString(), out var result))
 				{
@@ -5283,42 +5174,44 @@ public class Plugin : BaseUnityPlugin
 					int currentStorylineChapterFilter = GetCurrentStorylineChapterFilter();
 					if (expectedChapterNumber > 0 && currentStorylineChapterFilter != expectedChapterNumber)
 					{
-						ManualLogSource log0 = Log;
-						if (log0 != null)
-						{
-							log0.LogInfo((object)$"[故事线] 等待章节筛选同步: current={currentStorylineChapterFilter}, expected={expectedChapterNumber}, try={i + 1}/8");
-						}
-						continue;
-					}
-					OptionItem[] storylineNodes = GetStorylineNodes();
-					if (storylineNodes.Length > 0)
-					{
-						_inNodeMode = true;
-						_storylineNodes = storylineNodes;
-						_currentNodeIndex = 0;
-						_currentUIState = UIState.Storyline;
-						SpeakCurrentNode();
 						ManualLogSource log = Log;
 						if (log != null)
 						{
-							log.LogInfo((object)$"[故事线] 点击章节后自动进入节点浏览模式，共 {storylineNodes.Length} 个节点，章节={currentStorylineChapterFilter}");
+							log.LogInfo((object)$"[故事线] 等待章节筛选同步: current={currentStorylineChapterFilter}, expected={expectedChapterNumber}, try={i + 1}/8");
 						}
-						return;
+					}
+					else
+					{
+						OptionItem[] storylineNodes = GetStorylineNodes();
+						if (storylineNodes.Length != 0)
+						{
+							_inNodeMode = true;
+							_storylineNodes = storylineNodes;
+							_currentNodeIndex = 0;
+							_currentUIState = UIState.Storyline;
+							SpeakCurrentNode();
+							ManualLogSource log2 = Log;
+							if (log2 != null)
+							{
+								log2.LogInfo((object)$"[故事线] 点击章节后自动进入节点浏览模式，共 {storylineNodes.Length} 个节点，章节={currentStorylineChapterFilter}");
+							}
+							return;
+						}
 					}
 				}
 				catch (Exception ex)
 				{
-					ManualLogSource log2 = Log;
-					if (log2 != null)
+					ManualLogSource log3 = Log;
+					if (log3 != null)
 					{
-						log2.LogDebug((object)("[故事线] 点击章节后自动进入节点浏览失败: " + ex.Message));
+						log3.LogDebug((object)("[故事线] 点击章节后自动进入节点浏览失败: " + ex.Message));
 					}
 				}
 			}
-			ManualLogSource log3 = Log;
-			if (log3 != null)
+			ManualLogSource log4 = Log;
+			if (log4 != null)
 			{
-				log3.LogWarning((object)$"[故事线] 点击章节后没有等到目标章节节点，保持章节选择模式，expected={expectedChapterNumber}, current={GetCurrentStorylineChapterFilter()}");
+				log4.LogWarning((object)$"[故事线] 点击章节后没有等到目标章节节点，保持章节选择模式，expected={expectedChapterNumber}, current={GetCurrentStorylineChapterFilter()}");
 			}
 			TolkHelper.Speak("章节还没有加载完成，请稍后再试", interrupt: true);
 		});
@@ -5333,29 +5226,28 @@ public class Plugin : BaseUnityPlugin
 		try
 		{
 			ResolveStorylineTypes();
-			object obj = GetActiveObject(_chapterStorylineControllerType);
-			MethodInfo method = _chapterStorylineControllerType?.GetMethod("ShowChapterStoryline", BindingFlags.Instance | BindingFlags.Public);
-			if (obj != null && method != null)
+			object activeObject = GetActiveObject(_chapterStorylineControllerType);
+			MethodInfo methodInfo = _chapterStorylineControllerType?.GetMethod("ShowChapterStoryline", BindingFlags.Instance | BindingFlags.Public);
+			if (activeObject != null && methodInfo != null)
 			{
-				method.Invoke(obj, new object[1] { chapterNumber });
+				methodInfo.Invoke(activeObject, new object[1] { chapterNumber });
 				Log.LogInfo((object)$"[故事线] 直接调用 ShowChapterStoryline({chapterNumber})");
 			}
 			else
 			{
-				object activeObject = GetActiveObject(_progressTreeGraphControllerType);
-				if (activeObject == null)
+				object activeObject2 = GetActiveObject(_progressTreeGraphControllerType);
+				if (activeObject2 == null)
 				{
 					return false;
 				}
-				MethodInfo method2 = _progressTreeGraphControllerType.GetMethod("SetChapterFilter", BindingFlags.Instance | BindingFlags.Public);
-				MethodInfo method3 = _progressTreeGraphControllerType.GetMethod("Redraw", BindingFlags.Instance | BindingFlags.Public);
-				method2?.Invoke(activeObject, new object[1] { chapterNumber });
-				method3?.Invoke(activeObject, null);
+				MethodInfo? method = _progressTreeGraphControllerType.GetMethod("SetChapterFilter", BindingFlags.Instance | BindingFlags.Public);
+				MethodInfo method2 = _progressTreeGraphControllerType.GetMethod("Redraw", BindingFlags.Instance | BindingFlags.Public);
+				method?.Invoke(activeObject2, new object[1] { chapterNumber });
+				method2?.Invoke(activeObject2, null);
 				Log.LogInfo((object)$"[故事线] 直接设置章节筛选并重绘: {chapterNumber}");
 			}
-			object activeObject2 = GetActiveObject(_storylineUIManagerType);
-			MethodInfo method4 = _storylineUIManagerType?.GetMethod("SyncChapterContextAfterChapterChange", BindingFlags.Instance | BindingFlags.Public);
-			method4?.Invoke(activeObject2, new object[1] { chapterNumber });
+			object activeObject3 = GetActiveObject(_storylineUIManagerType);
+			(_storylineUIManagerType?.GetMethod("SyncChapterContextAfterChapterChange", BindingFlags.Instance | BindingFlags.Public))?.Invoke(activeObject3, new object[1] { chapterNumber });
 			return true;
 		}
 		catch (Exception ex)
@@ -5368,37 +5260,10 @@ public class Plugin : BaseUnityPlugin
 	private static void ReturnToChapterSelectionFromNodeMode()
 	{
 		_restoreStorylineNodeModeOnOpen = false;
-		_ignoreStorylineCloseUntilUtc = DateTime.UtcNow.AddMilliseconds(STORYLINE_RETURN_CLOSE_GUARD_MS);
 		ClearNodeMode("Return to chapter selection from node mode");
-		ShowStorylineChapterSelectionNative();
-		_currentUIState = UIState.Storyline;
-		_lastDetectedSignature = GetStorylineSignature();
 		EnterStorylineMode();
 		TolkHelper.Speak("已返回章节选择", interrupt: true);
 		MarkNeedDetect();
-	}
-
-	private static void ShowStorylineChapterSelectionNative()
-	{
-		try
-		{
-			ResolveStorylineTypes();
-			object activeObject = GetActiveObject(_storylineUIManagerType);
-			if (InvokeNoArg(activeObject, "ShowChapterSelection"))
-			{
-				Log.LogInfo((object)"[故事线] 已调用 StorylineUIManager.ShowChapterSelection 返回章节列表");
-				return;
-			}
-			object activeObject2 = GetActiveObject(_chapterStorylineControllerType);
-			if (InvokeNoArg(activeObject2, "ShowChapterSelection"))
-			{
-				Log.LogInfo((object)"[故事线] 已调用 ChapterStorylineController.ShowChapterSelection 返回章节列表");
-			}
-		}
-		catch (Exception ex)
-		{
-			Log.LogDebug((object)("[故事线] 调用原生章节列表失败: " + ex.Message));
-		}
 	}
 
 	private static void CloseStorylineFromChapterSelection()
@@ -5421,9 +5286,9 @@ public class Plugin : BaseUnityPlugin
 	{
 		if (_storylineNodes != null && _storylineNodes.Length != 0 && _currentNodeIndex >= 0 && _currentNodeIndex < _storylineNodes.Length)
 		{
-			OptionItem optionItem = _storylineNodes[_currentNodeIndex];
+			OptionItem obj = _storylineNodes[_currentNodeIndex];
 			PlayGameSound("Highlight");
-			TolkHelper.Speak(optionItem.Text, interrupt: true);
+			TolkHelper.Speak(obj.Text, interrupt: true);
 		}
 	}
 
@@ -5440,42 +5305,44 @@ public class Plugin : BaseUnityPlugin
 			if (clickableComponent == null)
 			{
 				TolkHelper.Speak("节点组件为空", interrupt: true);
-				return;
-			}
-			if (TryNavigateStorylineNodeDirect(optionItem))
-			{
-				return;
-			}
-			MethodInfo method = _progressTreeNodeComponentType.GetMethod("Skip2CurrentNode", BindingFlags.Instance | BindingFlags.Public);
-			if (method != null)
-			{
-				PlayGameSound("Click");
-				method.Invoke(clickableComponent, null);
-				TolkHelper.Speak("跳转到 " + optionItem.Text, interrupt: true);
-				AfterStorylineNodeJumpSuccess(null, "Storyline component Skip2CurrentNode");
-				ManualLogSource log = Log;
-				if (log != null)
-				{
-					log.LogInfo((object)("[故事线] 跳转到节点: " + optionItem.Text));
-				}
-				return;
-			}
-			MethodInfo method2 = _progressTreeNodeComponentType.GetMethod("Confirm", BindingFlags.Instance | BindingFlags.Public);
-			if (method2 != null)
-			{
-				PlayGameSound("Click");
-				method2.Invoke(clickableComponent, null);
-				TolkHelper.Speak("跳转到 " + optionItem.Text, interrupt: true);
-				AfterStorylineNodeJumpSuccess(null, "Storyline component Confirm");
-				ManualLogSource log2 = Log;
-				if (log2 != null)
-				{
-					log2.LogInfo((object)("[故事线] 跳转到节点(Confirm): " + optionItem.Text));
-				}
 			}
 			else
 			{
-				TolkHelper.Speak("未找到跳转方法", interrupt: true);
+				if (TryNavigateStorylineNodeDirect(optionItem))
+				{
+					return;
+				}
+				MethodInfo method = _progressTreeNodeComponentType.GetMethod("Skip2CurrentNode", BindingFlags.Instance | BindingFlags.Public);
+				if (method != null)
+				{
+					PlayGameSound("Click");
+					method.Invoke(clickableComponent, null);
+					TolkHelper.Speak("跳转到 " + optionItem.Text, interrupt: true);
+					AfterStorylineNodeJumpSuccess(null, "Storyline component Skip2CurrentNode");
+					ManualLogSource log = Log;
+					if (log != null)
+					{
+						log.LogInfo((object)("[故事线] 跳转到节点: " + optionItem.Text));
+					}
+					return;
+				}
+				MethodInfo method2 = _progressTreeNodeComponentType.GetMethod("Confirm", BindingFlags.Instance | BindingFlags.Public);
+				if (method2 != null)
+				{
+					PlayGameSound("Click");
+					method2.Invoke(clickableComponent, null);
+					TolkHelper.Speak("跳转到 " + optionItem.Text, interrupt: true);
+					AfterStorylineNodeJumpSuccess(null, "Storyline component Confirm");
+					ManualLogSource log2 = Log;
+					if (log2 != null)
+					{
+						log2.LogInfo((object)("[故事线] 跳转到节点(Confirm): " + optionItem.Text));
+					}
+				}
+				else
+				{
+					TolkHelper.Speak("未找到跳转方法", interrupt: true);
+				}
 			}
 		}
 		catch (Exception ex)
@@ -5516,9 +5383,9 @@ public class Plugin : BaseUnityPlugin
 			}
 			PlayGameSound("Click");
 			object obj = method.Invoke(activeObject, new object[1] { storylineNodeId });
-			if (obj is bool flag)
+			if (obj is bool)
 			{
-				if (flag)
+				if ((bool)obj)
 				{
 					TolkHelper.Speak("跳转到 " + optionItem.Text, interrupt: true);
 					Log.LogInfo((object)("[故事线] 直接跳转成功: " + optionItem.Text + ", nodeId=" + storylineNodeId));
@@ -5551,14 +5418,12 @@ public class Plugin : BaseUnityPlugin
 			{
 				return "";
 			}
-			FieldInfo field = progressTreeNodeComponent.GetType().GetField("node", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-			object obj = field?.GetValue(progressTreeNodeComponent);
+			object obj = progressTreeNodeComponent.GetType().GetField("node", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(progressTreeNodeComponent);
 			if (obj == null)
 			{
 				return "";
 			}
-			FieldInfo field2 = obj.GetType().GetField("nodeId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-			return field2?.GetValue(obj) as string ?? "";
+			return (obj.GetType().GetField("nodeId", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(obj) as string) ?? "";
 		}
 		catch (Exception ex)
 		{
@@ -5585,17 +5450,17 @@ public class Plugin : BaseUnityPlugin
 
 	private static void RememberStorylineChapterContext(string reason)
 	{
-		int currentStorylineChapterFilter = GetCurrentStorylineChapterFilter();
-		if (currentStorylineChapterFilter <= 0 && _lastStorylineChapterNumber > 0)
+		int num = GetCurrentStorylineChapterFilter();
+		if (num <= 0 && _lastStorylineChapterNumber > 0)
 		{
-			currentStorylineChapterFilter = _lastStorylineChapterNumber;
+			num = _lastStorylineChapterNumber;
 		}
-		if (currentStorylineChapterFilter <= 0)
+		if (num <= 0)
 		{
 			Log.LogInfo((object)("[故事线] 未能记录章节上下文: " + reason));
 			return;
 		}
-		_lastStorylineChapterNumber = currentStorylineChapterFilter;
+		_lastStorylineChapterNumber = num;
 		_restoreStorylineNodeModeOnOpen = true;
 		Log.LogInfo((object)$"[故事线] 已记录剧情章节上下文: chapter={_lastStorylineChapterNumber}, reason={reason}");
 	}
@@ -5604,12 +5469,11 @@ public class Plugin : BaseUnityPlugin
 	{
 		try
 		{
-			Type type = Type.GetType("MainMenuManager, Assembly-CSharp");
-			object activeObject0 = GetActiveObject(type);
-			object activeObject = GetActiveObject(_gameControllerType);
-			object activeObject2 = GetActiveObject(_storylineUIManagerType);
-			object obj = GetFieldValue(activeObject0, "storyLinePageToggle") ?? GetFieldValue(activeObject, "storyLinePageToggle");
-			if (InvokeAnyNoArg(activeObject2, "BackToMainMenu", "TestBackToMainMenu"))
+			object activeObject = GetActiveObject(Type.GetType("MainMenuManager, Assembly-CSharp"));
+			object activeObject2 = GetActiveObject(_gameControllerType);
+			object activeObject3 = GetActiveObject(_storylineUIManagerType);
+			object obj = GetFieldValue(activeObject, "storyLinePageToggle") ?? GetFieldValue(activeObject2, "storyLinePageToggle");
+			if (InvokeAnyNoArg(activeObject3, "BackToMainMenu", "TestBackToMainMenu"))
 			{
 				HideStorylineToggleIfStillVisible(obj);
 				Log.LogInfo((object)"[故事线] 已调用 StorylineUIManager 返回主菜单流程");
@@ -5620,27 +5484,26 @@ public class Plugin : BaseUnityPlugin
 				Log.LogInfo((object)"[故事线] 已调用 storyLinePageToggle 关闭方法");
 				return;
 			}
-			if (InvokeAnyNoArg(activeObject2, "Hide", "Close", "CloseStoryline", "HideStoryline", "OnClose", "OnBack", "ReturnToMain"))
+			if (InvokeAnyNoArg(activeObject3, "Hide", "Close", "CloseStoryline", "HideStoryline", "OnClose", "OnBack", "ReturnToMain"))
 			{
 				Log.LogInfo((object)"[故事线] 已调用 StorylineUIManager 关闭方法");
 				return;
 			}
-			if (InvokeAnyNoArg(activeObject0, "CloseStoryLine", "CloseStoryline", "HideStoryLine", "HideStoryline", "OnStoryLineBack", "OnStorylineBack", "Back"))
+			if (InvokeAnyNoArg(activeObject, "CloseStoryLine", "CloseStoryline", "HideStoryLine", "HideStoryline", "OnStoryLineBack", "OnStorylineBack", "Back"))
 			{
 				Log.LogInfo((object)"[故事线] 已调用 MainMenuManager 故事线关闭方法");
 				return;
 			}
-			object gameObject = GetComponentGameObject(obj);
-			if (gameObject != null && SetGameObjectActive(gameObject, false))
+			object componentGameObject = GetComponentGameObject(obj);
+			if (componentGameObject != null && SetGameObjectActive(componentGameObject, active: false))
 			{
 				Log.LogWarning((object)"[故事线] 未找到原生关闭方法，兜底隐藏 storyLinePageToggle GameObject");
 				return;
 			}
-			object gameObject2 = GetComponentGameObject(activeObject2);
-			if (gameObject2 != null && SetGameObjectActive(gameObject2, false))
+			object componentGameObject2 = GetComponentGameObject(activeObject3);
+			if (componentGameObject2 != null && SetGameObjectActive(componentGameObject2, active: false))
 			{
 				Log.LogWarning((object)"[故事线] 未找到原生关闭方法，兜底隐藏 StorylineUIManager GameObject");
-				return;
 			}
 		}
 		catch (Exception ex)
@@ -5660,8 +5523,8 @@ public class Plugin : BaseUnityPlugin
 			Log.LogInfo((object)"[故事线] 返回主菜单后 storyLinePageToggle 仍显示，已调用 PerformHide");
 			return;
 		}
-		object gameObject = GetComponentGameObject(storyLinePageToggle);
-		if (gameObject != null && SetGameObjectActive(gameObject, false))
+		object componentGameObject = GetComponentGameObject(storyLinePageToggle);
+		if (componentGameObject != null && SetGameObjectActive(componentGameObject, active: false))
 		{
 			Log.LogWarning((object)"[故事线] 返回主菜单后 storyLinePageToggle 仍显示，已兜底隐藏 GameObject");
 		}
@@ -5687,24 +5550,23 @@ public class Plugin : BaseUnityPlugin
 	{
 		try
 		{
-			object obj = GetFieldValue(gameController, "storyLinePageToggle");
-			if (obj == null)
+			object fieldValue = GetFieldValue(gameController, "storyLinePageToggle");
+			if (fieldValue == null)
 			{
-				object activeObject = GetActiveObject(_gameControllerType);
-				obj = GetFieldValue(activeObject, "storyLinePageToggle");
+				fieldValue = GetFieldValue(GetActiveObject(_gameControllerType), "storyLinePageToggle");
 			}
-			object gameObject2 = GetComponentGameObject(obj);
-			if (gameObject2 != null && SetGameObjectActive(gameObject2, false))
+			object componentGameObject = GetComponentGameObject(fieldValue);
+			if (componentGameObject != null && SetGameObjectActive(componentGameObject, active: false))
 			{
 				Log.LogInfo((object)"[故事线] 跳转节点后已直接隐藏 storyLinePageToggle GameObject");
 				StopMainMenuBackgroundMusicAfterStoryJump();
 				return;
 			}
-			object obj2 = GetFieldValue(gameController, "storylineUIManager") ?? GetActiveObject(_storylineUIManagerType);
-			if (obj2 != null)
+			object obj = GetFieldValue(gameController, "storylineUIManager") ?? GetActiveObject(_storylineUIManagerType);
+			if (obj != null)
 			{
-				object gameObject = GetComponentGameObject(obj2);
-				if (gameObject != null && SetGameObjectActive(gameObject, false))
+				object componentGameObject2 = GetComponentGameObject(obj);
+				if (componentGameObject2 != null && SetGameObjectActive(componentGameObject2, active: false))
 				{
 					Log.LogInfo((object)"[故事线] 跳转节点后已隐藏 StorylineUIManager GameObject");
 					StopMainMenuBackgroundMusicAfterStoryJump();
@@ -5723,8 +5585,7 @@ public class Plugin : BaseUnityPlugin
 	{
 		try
 		{
-			Type type = Type.GetType("BackgroundMusicManager, Assembly-CSharp");
-			object activeObject = GetActiveObject(type);
+			object activeObject = GetActiveObject(Type.GetType("BackgroundMusicManager, Assembly-CSharp"));
 			if (activeObject != null && InvokeNoArg(activeObject, "PauseBackgroundMusic"))
 			{
 				Log.LogInfo((object)"[音频] 故事线跳转后已暂停主页 BGM");
@@ -5744,8 +5605,7 @@ public class Plugin : BaseUnityPlugin
 		}
 		try
 		{
-			PropertyInfo property = component.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
-			return property?.GetValue(component);
+			return component.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public)?.GetValue(component);
 		}
 		catch
 		{
@@ -5778,7 +5638,7 @@ public class Plugin : BaseUnityPlugin
 
 	private static void ShowStorylineJumpFailureOption(string nodeText, string nodeId)
 	{
-		string text = string.IsNullOrWhiteSpace(nodeText) ? "这个节点" : nodeText.Trim();
+		string text = (string.IsNullOrWhiteSpace(nodeText) ? "这个节点" : nodeText.Trim());
 		string text2 = "故事线跳转失败：" + text + " 当前进度不足，不能从现在的剧情路径连接到这个节点。请先继续剧情或到达前置结尾后再尝试。";
 		ClearNodeMode("Storyline jump failed");
 		_currentUIState = UIState.Options;
@@ -5795,7 +5655,15 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool IsStorylineFailureOption(OptionItem optionItem)
 	{
-		return optionItem != null && !string.IsNullOrWhiteSpace(optionItem.Text) && (optionItem.Text.StartsWith("故事线跳转失败：", StringComparison.Ordinal) || optionItem.Text.StartsWith("结尾提示：", StringComparison.Ordinal));
+		if (optionItem != null && !string.IsNullOrWhiteSpace(optionItem.Text))
+		{
+			if (!optionItem.Text.StartsWith("故事线跳转失败：", StringComparison.Ordinal))
+			{
+				return optionItem.Text.StartsWith("结尾提示：", StringComparison.Ordinal);
+			}
+			return true;
+		}
+		return false;
 	}
 
 	private static void ResolveQTETypes()
@@ -5976,29 +5844,27 @@ public class Plugin : BaseUnityPlugin
 		string text = GetTextFromTextComponent(GetFieldValue(manager, "specialText"));
 		if (string.IsNullOrWhiteSpace(text))
 		{
-			string text2 = GetTextFromTextComponent(GetFieldValue(manager, "titleText"));
-			string text3 = GetTextFromTextComponent(GetFieldValue(manager, "contentText"));
-			text = JoinSpeechParts(text2, text3);
+			string textFromTextComponent = GetTextFromTextComponent(GetFieldValue(manager, "titleText"));
+			string textFromTextComponent2 = GetTextFromTextComponent(GetFieldValue(manager, "contentText"));
+			text = JoinSpeechParts(textFromTextComponent, textFromTextComponent2);
 		}
 		text = NormalizeSpeechText(text);
 		if (string.IsNullOrWhiteSpace(text))
 		{
 			_lastNarrationSpeakText = "";
-			return;
 		}
-		if (text == _lastNarrationSpeakText)
+		else if (!(text == _lastNarrationSpeakText))
 		{
-			return;
+			_lastNarrationSpeakText = text;
+			_lastSpokenText = text;
+			TolkHelper.Speak(text, interrupt: true);
+			ManualLogSource log = Log;
+			if (log != null)
+			{
+				log.LogInfo((object)("[剧情旁白] 强制朗读: " + text));
+			}
+			MarkNeedDetect();
 		}
-		_lastNarrationSpeakText = text;
-		_lastSpokenText = text;
-		TolkHelper.Speak(text, interrupt: true);
-		ManualLogSource log = Log;
-		if (log != null)
-		{
-			log.LogInfo((object)("[剧情旁白] 强制朗读: " + text));
-		}
-		MarkNeedDetect();
 	}
 
 	private static bool IsNarrationTextComponent(object textComponent)
@@ -6021,11 +5887,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			foreach (object item in array)
 			{
-				if (item == null)
-				{
-					continue;
-				}
-				if (textComponent == GetFieldValue(item, "titleText") || textComponent == GetFieldValue(item, "contentText") || textComponent == GetFieldValue(item, "specialText"))
+				if (item != null && (textComponent == GetFieldValue(item, "titleText") || textComponent == GetFieldValue(item, "contentText") || textComponent == GetFieldValue(item, "specialText")))
 				{
 					return true;
 				}
@@ -6048,26 +5910,24 @@ public class Plugin : BaseUnityPlugin
 		{
 			return "";
 		}
-		PropertyInfo property = textComponent.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public);
-		object obj = property?.GetValue(textComponent);
-		PropertyInfo property2 = obj?.GetType().GetProperty("activeInHierarchy", BindingFlags.Instance | BindingFlags.Public);
-		if (property2 != null && !(bool)property2.GetValue(obj))
+		object obj = textComponent.GetType().GetProperty("gameObject", BindingFlags.Instance | BindingFlags.Public)?.GetValue(textComponent);
+		PropertyInfo propertyInfo = obj?.GetType().GetProperty("activeInHierarchy", BindingFlags.Instance | BindingFlags.Public);
+		if (propertyInfo != null && !(bool)propertyInfo.GetValue(obj))
 		{
 			return "";
 		}
-		PropertyInfo property3 = textComponent.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public);
-		return (property3?.GetValue(textComponent) as string) ?? "";
+		return (textComponent.GetType().GetProperty("text", BindingFlags.Instance | BindingFlags.Public)?.GetValue(textComponent) as string) ?? "";
 	}
 
 	private static string JoinSpeechParts(params string[] parts)
 	{
 		List<string> list = new List<string>();
-		foreach (string text in parts)
+		for (int i = 0; i < parts.Length; i++)
 		{
-			string text2 = NormalizeSpeechText(text);
-			if (!string.IsNullOrWhiteSpace(text2))
+			string text = NormalizeSpeechText(parts[i]);
+			if (!string.IsNullOrWhiteSpace(text))
 			{
-				list.Add(text2);
+				list.Add(text);
 			}
 		}
 		return string.Join("。", list.ToArray());
@@ -6082,313 +5942,10 @@ public class Plugin : BaseUnityPlugin
 		return text.Replace("\r", " ").Replace("\n", " ").Trim();
 	}
 
-	private static void ApplyEventValueChangePatches(Harmony harmony)
-	{
-		//IL_0097: Unknown result type (might be due to invalid IL or missing references)
-		//IL_009d: Expected O, but got Unknown
-		if (harmony == null)
-		{
-			return;
-		}
-		Type type = Type.GetType("EventValueChangeNotifier, Assembly-CSharp");
-		if (type == null)
-		{
-			Log.LogWarning((object)"未找到 EventValueChangeNotifier，跳过剧情数值变化通知补丁");
-			return;
-		}
-		MethodInfo method = type.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-			.FirstOrDefault((MethodInfo candidate) => candidate.Name == "ShowNotifications" && candidate.GetParameters().Length == 1);
-		if (method == null)
-		{
-			Log.LogWarning((object)"未找到 EventValueChangeNotifier.ShowNotifications，跳过剧情数值变化通知补丁");
-			return;
-		}
-		HarmonyMethod val = new HarmonyMethod(typeof(Plugin).GetMethod("EventValueChangePostfix", BindingFlags.Static | BindingFlags.NonPublic));
-		harmony.Patch((MethodBase)method, (HarmonyMethod)null, val, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null);
-		Log.LogInfo((object)("找到并补丁剧情数值变化方法: " + method.DeclaringType.Name + "." + method.Name));
-	}
-
-	private static void EventValueChangePostfix(object[] __args)
-	{
-		try
-		{
-			if (__args == null || __args.Length == 0)
-			{
-				return;
-			}
-			List<string> list = new List<string>();
-			foreach (object item in EnumerateObjects(__args[0]))
-			{
-				string text = GetFieldValue(item, "elementKey") as string;
-				int num = GetEventDeltaValue(item);
-				string text2 = FormatEventValueChangeSpeech(text, num);
-				if (!string.IsNullOrWhiteSpace(text2))
-				{
-					list.Add(text2);
-				}
-			}
-			if (list.Count == 0)
-			{
-				return;
-			}
-			string text3 = string.Join("。", list.ToArray());
-			DateTime utcNow = DateTime.UtcNow;
-			if (text3 == _lastEventValueSpeakText && (utcNow - _lastEventValueSpeakUtc).TotalMilliseconds < 1200.0)
-			{
-				return;
-			}
-			_lastEventValueSpeakText = text3;
-			_lastEventValueSpeakUtc = utcNow;
-			_lastSpokenText = text3;
-			TolkHelper.Speak(text3, interrupt: true);
-			ManualLogSource log = Log;
-			if (log != null)
-			{
-				log.LogInfo((object)("[剧情数值] 强制朗读: " + text3));
-			}
-			MarkNeedDetect();
-		}
-		catch (Exception ex)
-		{
-			ManualLogSource log2 = Log;
-			if (log2 != null)
-			{
-				log2.LogWarning((object)("[剧情数值] 朗读失败: " + ex.Message));
-			}
-		}
-	}
-
-	private static int GetEventDeltaValue(object item)
-	{
-		object fieldValue = GetFieldValue(item, "delta");
-		if (fieldValue == null)
-		{
-			return 0;
-		}
-		try
-		{
-			return Convert.ToInt32(fieldValue);
-		}
-		catch
-		{
-			return 0;
-		}
-	}
-
-	private static string FormatEventValueChangeSpeech(string key, int delta)
-	{
-		key = NormalizeSpeechText(key);
-		if (string.IsNullOrWhiteSpace(key) || delta == 0)
-		{
-			return "";
-		}
-		string text = (delta > 0) ? "增加" : "减少";
-		int num = Math.Abs(delta);
-		if (key.Contains("金钱") || key.Contains("钱"))
-		{
-			return key + text + " " + num + " 元";
-		}
-		return key + text + " " + num;
-	}
-
-	private static void ApplyStoryContinuePatches(Harmony harmony)
-	{
-		//IL_0097: Unknown result type (might be due to invalid IL or missing references)
-		//IL_009d: Expected O, but got Unknown
-		if (harmony == null)
-		{
-			return;
-		}
-		Type type = Type.GetType("GameController, Assembly-CSharp");
-		if (type == null)
-		{
-			Log.LogWarning((object)"未找到 GameController，跳过剧情继续按钮补丁");
-			return;
-		}
-		MethodInfo method = type.GetMethod("ShowNextNodeButton", BindingFlags.Instance | BindingFlags.NonPublic);
-		if (method == null)
-		{
-			Log.LogWarning((object)"未找到 GameController.ShowNextNodeButton，跳过剧情继续按钮补丁");
-			return;
-		}
-		HarmonyMethod val = new HarmonyMethod(typeof(Plugin).GetMethod("ShowNextNodeButtonPrefix", BindingFlags.Static | BindingFlags.NonPublic));
-		harmony.Patch((MethodBase)method, val, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null, (HarmonyMethod)null);
-		Log.LogInfo((object)"找到并补丁 GameController.ShowNextNodeButton");
-	}
-
-	private static bool ShowNextNodeButtonPrefix(object __instance)
-	{
-		try
-		{
-			if (TryAutoAdvanceStoryContinue(__instance, "[剧情继续] 拦截继续按钮并自动进入下一节点"))
-			{
-				return false;
-			}
-		}
-		catch (Exception ex)
-		{
-			Log.LogWarning((object)("[剧情继续] ShowNextNodeButton 前置补丁失败: " + ex.Message));
-		}
-		return true;
-	}
-
-	private static void CheckStoryContinueAutomation()
-	{
-		try
-		{
-			DateTime utcNow = DateTime.UtcNow;
-			if ((utcNow - _lastStoryContinueCheckUtc).TotalMilliseconds < 300.0)
-			{
-				return;
-			}
-			_lastStoryContinueCheckUtc = utcNow;
-			if (!IsSafeForStoryContinueAutomation())
-			{
-				return;
-			}
-			if (_gameControllerType == null)
-			{
-				return;
-			}
-			object activeObject = GetActiveObject(_gameControllerType);
-			if (activeObject != null)
-			{
-				TryAutoAdvanceStoryContinue(activeObject, "[剧情继续] 检测到循环剧情已完成，自动进入下一节点");
-			}
-		}
-		catch (Exception ex)
-		{
-			Log.LogDebug((object)("[剧情继续] 自动检测失败: " + ex.Message));
-		}
-	}
-
-	private static bool TryAutoAdvanceStoryContinue(object gameController, string successLog)
-	{
-		if (gameController == null)
-		{
-			return false;
-		}
-		if (!IsSafeForStoryContinueAutomation())
-		{
-			return false;
-		}
-		object fieldValue = GetFieldValue(gameController, "currentNode");
-		if (!IsCompletedRevisitableContinueNode(gameController, fieldValue, out var targetNode))
-		{
-			return false;
-		}
-		string gameNodeId = GetGameNodeId(fieldValue);
-		DateTime utcNow = DateTime.UtcNow;
-		if (gameNodeId == _lastStoryContinueNodeId && (utcNow - _lastStoryContinueActivateUtc).TotalMilliseconds < 1500.0)
-		{
-			return false;
-		}
-		_lastStoryContinueNodeId = gameNodeId;
-		_lastStoryContinueActivateUtc = utcNow;
-		if (ActivateGameNode(gameController, targetNode, successLog + ": " + gameNodeId + " -> " + GetGameNodeId(targetNode)))
-		{
-			ClearCurrentOptionsAfterTransientClick("auto story continue");
-			MarkNeedDetect();
-			return true;
-		}
-		return false;
-	}
-
-	private static bool IsSafeForStoryContinueAutomation()
-	{
-		try
-		{
-			if (_currentUIState == UIState.Settings || _currentUIState == UIState.Archive || _currentUIState == UIState.Storyline || _currentUIState == UIState.QTE)
-			{
-				return false;
-			}
-			if (IsQTEActive() || IsInSettingsPage() || IsInArchivePage() || IsInStorylinePage() || IsStartOrMainMenuPageVisible())
-			{
-				return false;
-			}
-			OptionItem[] endingPageOptions = GetEndingPageOptions();
-			return endingPageOptions == null || endingPageOptions.Length == 0;
-		}
-		catch
-		{
-			return false;
-		}
-	}
-
-	private static bool IsCompletedRevisitableContinueNode(object gameController, object currentNode, out object targetNode)
-	{
-		targetNode = null;
-		if (gameController == null || currentNode == null)
-		{
-			return false;
-		}
-		string text = GetFieldValue(currentNode, "nodeType")?.ToString() ?? "";
-		if (!text.Equals("RevisitableOptionNode", StringComparison.OrdinalIgnoreCase))
-		{
-			return false;
-		}
-		targetNode = GetFieldValue(currentNode, "nextNodeAfterAllOptions");
-		if (targetNode == null)
-		{
-			return false;
-		}
-		return IsRevisitableOptionCompleteByState(gameController, currentNode);
-	}
-
-	private static bool IsRevisitableOptionCompleteByState(object gameController, object node)
-	{
-		try
-		{
-			object fieldValue = GetFieldValue(node, "options");
-			List<object> list = EnumerateObjects(fieldValue).Where((object option) => option != null).ToList();
-			if (list.Count == 0)
-			{
-				return false;
-			}
-			string gameNodeId = GetGameNodeId(node);
-			bool[] revisitableVisitedArray = GetRevisitableVisitedArray(GetFieldValue(gameController, "revisitableOptionStates"), gameNodeId);
-			if (revisitableVisitedArray == null || revisitableVisitedArray.Length == 0)
-			{
-				return false;
-			}
-			int num = 0;
-			for (int i = 0; i < Math.Min(revisitableVisitedArray.Length, list.Count); i++)
-			{
-				if (revisitableVisitedArray[i])
-				{
-					num++;
-				}
-			}
-			int num2 = 0;
-			object fieldValue2 = GetFieldValue(node, "requiredVisitedOptionCountBeforeNext");
-			if (fieldValue2 != null)
-			{
-				try
-				{
-					num2 = Convert.ToInt32(fieldValue2);
-				}
-				catch
-				{
-					num2 = 0;
-				}
-			}
-			if (num2 <= 0 || num2 > list.Count)
-			{
-				num2 = list.Count;
-			}
-			return num >= num2;
-		}
-		catch (Exception ex)
-		{
-			Log.LogDebug((object)("[剧情继续] 判断循环节点完成状态失败: " + ex.Message));
-			return false;
-		}
-	}
-
 	private static void ApplyQTEPatches(Harmony harmony)
 	{
-		//IL_00a1: Unknown result type (might be due to invalid IL or missing references)
-		//IL_00a7: Expected O, but got Unknown
+		//IL_0095: Unknown result type (might be due to invalid IL or missing references)
+		//IL_009b: Expected O, but got Unknown
 		try
 		{
 			ResolveQTETypes();
@@ -6449,28 +6006,22 @@ public class Plugin : BaseUnityPlugin
 			List<OptionItem> list = new List<OptionItem>();
 			foreach (object item in array)
 			{
-				if (!IsComponentActiveInHierarchy(item) || !HasInvokableOnClick(item))
+				if (IsComponentActiveInHierarchy(item) && HasInvokableOnClick(item))
 				{
-					continue;
-				}
-				if (IsGameControllerTriggerArea(item))
-				{
-					Log.LogDebug((object)"[探索] 跳过剧情全屏继续触发区，避免朗读继续按钮");
-					continue;
-				}
-				OptionItem optionItem = new OptionItem();
-				optionItem.Text = (list.Count == 0) ? "继续" : ("探索交互点 " + (list.Count + 1));
-				optionItem.ClickableComponent = item;
-				if (TryGetScreenPosition(GetGameObjectFromComponent(item), out var x, out var y))
-				{
-					optionItem.ScreenX = x;
-					optionItem.ScreenY = y;
-					optionItem.HasScreenPosition = true;
-				}
-				list.Add(optionItem);
-				if (list.Count >= 20)
-				{
-					break;
+					OptionItem optionItem = new OptionItem();
+					optionItem.Text = ((list.Count == 0) ? "继续" : ("探索交互点 " + (list.Count + 1)));
+					optionItem.ClickableComponent = item;
+					if (TryGetScreenPosition(GetGameObjectFromComponent(item), out var x, out var y))
+					{
+						optionItem.ScreenX = x;
+						optionItem.ScreenY = y;
+						optionItem.HasScreenPosition = true;
+					}
+					list.Add(optionItem);
+					if (list.Count >= 20)
+					{
+						break;
+					}
 				}
 			}
 			if (list.Count > 0)
@@ -6486,38 +6037,6 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
-	private static bool IsGameControllerTriggerArea(object component)
-	{
-		if (component == null)
-		{
-			return false;
-		}
-		try
-		{
-			if (_triggerAreaType != null && !_triggerAreaType.IsInstanceOfType(component))
-			{
-				return false;
-			}
-			if (_gameControllerType == null)
-			{
-				return false;
-			}
-			object activeObject = GetActiveObject(_gameControllerType);
-			object obj = GetFieldValue(activeObject, "triggerArea");
-			if (obj == null)
-			{
-				return false;
-			}
-			object gameObjectFromComponent = GetGameObjectFromComponent(component);
-			return gameObjectFromComponent != null && object.ReferenceEquals(gameObjectFromComponent, obj);
-		}
-		catch (Exception ex)
-		{
-			Log.LogDebug((object)("[探索] 判断剧情触发区失败: " + ex.Message));
-			return false;
-		}
-	}
-
 	private static bool HasInvokableOnClick(object component)
 	{
 		if (component == null)
@@ -6525,12 +6044,15 @@ public class Plugin : BaseUnityPlugin
 			return false;
 		}
 		Type type = component.GetType();
-		object obj;
-		if (TryGetEventLikeMember(type, component, "onClick", out obj) && HasPublicInvoke(obj))
+		if (TryGetEventLikeMember(type, component, "onClick", out var value) && HasPublicInvoke(value))
 		{
 			return true;
 		}
-		return HasNoArgMethod(type, "OnClick") || HasNoArgMethod(type, "Click") || HasNoArgMethod(type, "OnMouseDown") || HasNoArgMethod(type, "Trigger") || HasNoArgMethod(type, "OnTrigger");
+		if (!HasNoArgMethod(type, "OnClick") && !HasNoArgMethod(type, "Click") && !HasNoArgMethod(type, "OnMouseDown") && !HasNoArgMethod(type, "Trigger"))
+		{
+			return HasNoArgMethod(type, "OnTrigger");
+		}
+		return true;
 	}
 
 	private static void SpeakQTEPrompt(object qteController, bool allowRecentRepeat)
@@ -6543,10 +6065,10 @@ public class Plugin : BaseUnityPlugin
 				Log.LogDebug((object)"[QTE] 提示刚朗读过，跳过重复提示");
 				return;
 			}
-			string text = GetQTEPrompt(qteController);
+			string qTEPrompt = GetQTEPrompt(qteController);
 			_lastQTESpeakUtc = utcNow;
-			TolkHelper.Speak(text, interrupt: true);
-			Log.LogInfo((object)("[QTE] 朗读提示: " + text));
+			TolkHelper.Speak(qTEPrompt, interrupt: true);
+			Log.LogInfo((object)("[QTE] 朗读提示: " + qTEPrompt));
 		}
 		catch (Exception ex)
 		{
@@ -6557,10 +6079,10 @@ public class Plugin : BaseUnityPlugin
 
 	private static string GetQTEPrompt(object qteController)
 	{
-		string text = GetQTEDirectionText(qteController);
-		if (!string.IsNullOrWhiteSpace(text))
+		string qTEDirectionText = GetQTEDirectionText(qteController);
+		if (!string.IsNullOrWhiteSpace(qTEDirectionText))
 		{
-			return "空格，" + text;
+			return "空格，" + qTEDirectionText;
 		}
 		return "空格";
 	}
@@ -6592,8 +6114,8 @@ public class Plugin : BaseUnityPlugin
 			Type type = fieldValue3.GetType();
 			FieldInfo field = type.GetField("x", BindingFlags.Instance | BindingFlags.Public);
 			FieldInfo field2 = type.GetField("y", BindingFlags.Instance | BindingFlags.Public);
-			float num = (field != null) ? ((float)field.GetValue(fieldValue3)) : 0f;
-			float num2 = (field2 != null) ? ((float)field2.GetValue(fieldValue3)) : 0f;
+			float num = ((field != null) ? ((float)field.GetValue(fieldValue3)) : 0f);
+			float num2 = ((field2 != null) ? ((float)field2.GetValue(fieldValue3)) : 0f);
 			if (Math.Abs(num) >= Math.Abs(num2))
 			{
 				return (num < 0f) ? "向左闪避" : "向右闪避";
@@ -6678,10 +6200,10 @@ public class Plugin : BaseUnityPlugin
 			Log.LogWarning((object)"【跳过 QTE】未找到安全成功回调，取消兜底禁用/StopQTE，避免误暂停或误判失败");
 			return false;
 		}
-		catch (Exception ex4)
+		catch (Exception ex)
 		{
-			Log.LogError((object)("【跳过 QTE】异常: " + ex4.GetType().Name + " - " + ex4.Message));
-			Log.LogError((object)("堆栈: " + ex4.StackTrace));
+			Log.LogError((object)("【跳过 QTE】异常: " + ex.GetType().Name + " - " + ex.Message));
+			Log.LogError((object)("堆栈: " + ex.StackTrace));
 			return false;
 		}
 	}
@@ -6767,16 +6289,14 @@ public class Plugin : BaseUnityPlugin
 			int num = 0;
 			int num2 = 0;
 			Assembly[] array = assemblies;
-			Assembly[] array2 = array;
-			foreach (Assembly assembly in array2)
+			foreach (Assembly assembly in array)
 			{
 				try
 				{
 					Type[] types = assembly.GetTypes();
 					num += types.Length;
-					Type[] array3 = types;
-					Type[] array4 = array3;
-					foreach (Type type in array4)
+					Type[] array2 = types;
+					foreach (Type type in array2)
 					{
 						if (IsInterestingType(type))
 						{
@@ -6797,9 +6317,8 @@ public class Plugin : BaseUnityPlugin
 					{
 						continue;
 					}
-					Type[] types3 = ex.Types;
-					Type[] array5 = types3;
-					foreach (Type type2 in array5)
+					Type[] array2 = ex.Types;
+					foreach (Type type2 in array2)
 					{
 						if (type2 != null && IsInterestingType(type2))
 						{
@@ -6874,8 +6393,7 @@ public class Plugin : BaseUnityPlugin
 			return false;
 		}
 		string[] cODE_EXPLORE_KEYWORDS = CODE_EXPLORE_KEYWORDS;
-		string[] array = cODE_EXPLORE_KEYWORDS;
-		foreach (string value in array)
+		foreach (string value in cODE_EXPLORE_KEYWORDS)
 		{
 			if (name.IndexOf(value, StringComparison.OrdinalIgnoreCase) >= 0)
 			{
@@ -6903,8 +6421,7 @@ public class Plugin : BaseUnityPlugin
 		{
 			Log.LogInfo((object)$"  公共字段 ({fields.Length} 个):");
 			FieldInfo[] array = fields;
-			FieldInfo[] array2 = array;
-			foreach (FieldInfo fieldInfo in array2)
+			foreach (FieldInfo fieldInfo in array)
 			{
 				string text2 = (fieldInfo.IsStatic ? " static" : "");
 				Log.LogInfo((object)("    - " + fieldInfo.FieldType.Name + " " + fieldInfo.Name + text2));
@@ -6914,9 +6431,8 @@ public class Plugin : BaseUnityPlugin
 		if (properties.Length != 0)
 		{
 			Log.LogInfo((object)$"  公共属性 ({properties.Length} 个):");
-			PropertyInfo[] array3 = properties;
-			PropertyInfo[] array4 = array3;
-			foreach (PropertyInfo propertyInfo in array4)
+			PropertyInfo[] array2 = properties;
+			foreach (PropertyInfo propertyInfo in array2)
 			{
 				string text3 = "";
 				if (propertyInfo.CanRead && propertyInfo.CanWrite)
@@ -6938,9 +6454,8 @@ public class Plugin : BaseUnityPlugin
 		if (methods.Length != 0)
 		{
 			Log.LogInfo((object)$"  公共方法 ({methods.Length} 个):");
-			MethodInfo[] array5 = methods;
-			MethodInfo[] array6 = array5;
-			foreach (MethodInfo methodInfo in array6)
+			MethodInfo[] array3 = methods;
+			foreach (MethodInfo methodInfo in array3)
 			{
 				if (!methodInfo.IsSpecialName)
 				{
@@ -6986,35 +6501,35 @@ public class Plugin : BaseUnityPlugin
 				{
 					return CallNextHookEx(_hookId, nCode, wParam, lParam);
 				}
-				if (wParam == (IntPtr)260 || (num2 & LLKHF_ALTDOWN) != 0)
+				if (wParam == (IntPtr)260 || ((uint)num2 & 0x20u) != 0)
 				{
-					ManualLogSource log6 = Log;
-					if (log6 != null)
+					ManualLogSource log = Log;
+					if (log != null)
 					{
-						log6.LogDebug((object)$"[键盘钩子] Alt/System 组合键 0x{num:X2} 放行");
+						log.LogDebug((object)$"[键盘钩子] Alt/System 组合键 0x{num:X2} 放行");
 					}
 					return CallNextHookEx(_hookId, nCode, wParam, lParam);
 				}
-				ManualLogSource log = Log;
-				if (log != null)
+				ManualLogSource log2 = Log;
+				if (log2 != null)
 				{
-					log.LogDebug((object)$"[键盘钩子] 按键: 0x{num:X2}");
+					log2.LogDebug((object)$"[键盘钩子] 按键: 0x{num:X2}");
 				}
 				if (IsModifierKeyDown() && !IsModifierKey(num) && !ShouldHandleKeyEvenWithModifier(num))
 				{
-					ManualLogSource log5 = Log;
-					if (log5 != null)
+					ManualLogSource log3 = Log;
+					if (log3 != null)
 					{
-						log5.LogDebug((object)$"[键盘钩子] 组合键 0x{num:X2} 放行");
+						log3.LogDebug((object)$"[键盘钩子] 组合键 0x{num:X2} 放行");
 					}
 					return CallNextHookEx(_hookId, nCode, wParam, lParam);
 				}
-				if (num == VK_SPACE && ShouldSuppressSpaceForQTE())
+				if (num == 32 && ShouldSuppressSpaceForQTE())
 				{
-					ManualLogSource log7 = Log;
-					if (log7 != null)
+					ManualLogSource log4 = Log;
+					if (log4 != null)
 					{
-						log7.LogInfo((object)"[键盘钩子] QTE 期间拦截空格，避免传给游戏暂停");
+						log4.LogInfo((object)"[键盘钩子] QTE 期间拦截空格，避免传给游戏暂停");
 					}
 					if (ShouldTrySkipQTEFromSuppressedSpace())
 					{
@@ -7022,25 +6537,15 @@ public class Plugin : BaseUnityPlugin
 					}
 					return new IntPtr(1);
 				}
-				if (ShouldSuppressStorylineNavigationKeyForGame(num))
-				{
-					ManualLogSource log8 = Log;
-					if (log8 != null)
-					{
-						log8.LogInfo((object)$"[键盘钩子] 拦截故事线导航键 0x{num:X2}，避免游戏原生返回同时触发");
-					}
-					HandleSuppressedStorylineNavigationKey(num);
-					return new IntPtr(1);
-				}
 				return CallNextHookEx(_hookId, nCode, wParam, lParam);
 			}
 		}
 		catch (Exception ex)
 		{
-			ManualLogSource log4 = Log;
-			if (log4 != null)
+			ManualLogSource log5 = Log;
+			if (log5 != null)
 			{
-				log4.LogError((object)("键盘钩子回调异常: " + ex.GetType().Name + " - " + ex.Message));
+				log5.LogError((object)("键盘钩子回调异常: " + ex.GetType().Name + " - " + ex.Message));
 			}
 		}
 		return CallNextHookEx(_hookId, nCode, wParam, lParam);
@@ -7068,10 +6573,10 @@ public class Plugin : BaseUnityPlugin
 			{
 			case 116:
 			{
-				ManualLogSource log14 = Log;
-				if (log14 != null)
+				ManualLogSource log8 = Log;
+				if (log8 != null)
 				{
-					log14.LogInfo((object)"[快捷键] F5 按下 - 重复朗读");
+					log8.LogInfo((object)"[快捷键] F5 按下 - 重复朗读");
 				}
 				if (!string.IsNullOrEmpty(_lastSpokenText))
 				{
@@ -7086,10 +6591,10 @@ public class Plugin : BaseUnityPlugin
 			}
 			case 117:
 			{
-				ManualLogSource log2 = Log;
-				if (log2 != null)
+				ManualLogSource log9 = Log;
+				if (log9 != null)
 				{
-					log2.LogInfo((object)"[快捷键] F6 按下 - 停止朗读");
+					log9.LogInfo((object)"[快捷键] F6 按下 - 停止朗读");
 				}
 				TolkHelper.Stop();
 				_suppressCurrentKey = true;
@@ -7103,10 +6608,10 @@ public class Plugin : BaseUnityPlugin
 					_suppressCurrentKey = true;
 					break;
 				}
-				ManualLogSource log6 = Log;
-				if (log6 != null)
+				ManualLogSource log7 = Log;
+				if (log7 != null)
 				{
-					log6.LogInfo((object)"[快捷键] F11 按下 - 切换自动过 QTE 模式");
+					log7.LogInfo((object)"[快捷键] F11 按下 - 切换自动过 QTE 模式");
 				}
 				ToggleAutoQTE();
 				_suppressCurrentKey = true;
@@ -7114,10 +6619,10 @@ public class Plugin : BaseUnityPlugin
 			}
 			case 114:
 			{
-				ManualLogSource log12 = Log;
-				if (log12 != null)
+				ManualLogSource log14 = Log;
+				if (log14 != null)
 				{
-					log12.LogInfo((object)"[快捷键] F3 按下 - 跳转到当前节点");
+					log14.LogInfo((object)"[快捷键] F3 按下 - 跳转到当前节点");
 				}
 				if (_currentUIState == UIState.Storyline)
 				{
@@ -7132,10 +6637,10 @@ public class Plugin : BaseUnityPlugin
 			}
 			case 8:
 			{
-				ManualLogSource log8 = Log;
-				if (log8 != null)
+				ManualLogSource log13 = Log;
+				if (log13 != null)
 				{
-					log8.LogInfo((object)"[快捷键] 退格键 按下 - 快退");
+					log13.LogInfo((object)"[快捷键] 退格键 按下 - 快退");
 				}
 				if (_currentUIState == UIState.Storyline || _inNodeMode)
 				{
@@ -7150,19 +6655,14 @@ public class Plugin : BaseUnityPlugin
 			}
 			case 27:
 			{
-				ManualLogSource log18 = Log;
-				if (log18 != null)
+				ManualLogSource log10 = Log;
+				if (log10 != null)
 				{
-					log18.LogInfo((object)"[快捷键] ESC 按下");
+					log10.LogInfo((object)"[快捷键] ESC 按下");
 				}
 				if (_inNodeMode)
 				{
 					ReturnToChapterSelectionFromNodeMode();
-					_suppressCurrentKey = true;
-				}
-				else if (_currentUIState == UIState.Storyline && DateTime.UtcNow < _ignoreStorylineCloseUntilUtc)
-				{
-					Log.LogInfo((object)"[故事线] 刚从节点返回章节列表，忽略本次关闭故事线请求");
 					_suppressCurrentKey = true;
 				}
 				else if (_currentUIState == UIState.Storyline)
@@ -7182,30 +6682,28 @@ public class Plugin : BaseUnityPlugin
 				break;
 			}
 			case 32:
-			{
 				if (IsQTEInputActive())
 				{
-					ManualLogSource log15 = Log;
-					if (log15 != null)
+					ManualLogSource log5 = Log;
+					if (log5 != null)
 					{
-						log15.LogInfo((object)"[快捷键] 空格 按下");
+						log5.LogInfo((object)"[快捷键] 空格 按下");
 					}
-					ManualLogSource log16 = Log;
-					if (log16 != null)
+					ManualLogSource log6 = Log;
+					if (log6 != null)
 					{
-						log16.LogInfo((object)"[QTE] 检测到空格，跳过当前 QTE");
+						log6.LogInfo((object)"[QTE] 检测到空格，跳过当前 QTE");
 					}
 					SkipCurrentQTE();
 					_suppressCurrentKey = true;
 				}
 				break;
-			}
 			case 68:
 			{
-				ManualLogSource log9 = Log;
-				if (log9 != null)
+				ManualLogSource log11 = Log;
+				if (log11 != null)
 				{
-					log9.LogInfo((object)"[快捷键] D 键按下 - 切换字幕朗读开关");
+					log11.LogInfo((object)"[快捷键] D 键按下 - 切换字幕朗读开关");
 				}
 				ToggleSubtitleSpeak();
 				_suppressCurrentKey = true;
@@ -7213,10 +6711,10 @@ public class Plugin : BaseUnityPlugin
 			}
 			case 13:
 			{
-				ManualLogSource log5 = Log;
-				if (log5 != null)
+				ManualLogSource log4 = Log;
+				if (log4 != null)
 				{
-					log5.LogInfo((object)"[快捷键] 回车 按下");
+					log4.LogInfo((object)"[快捷键] 回车 按下");
 				}
 				if (_inNodeMode && _storylineNodes.Length != 0)
 				{
@@ -7241,10 +6739,10 @@ public class Plugin : BaseUnityPlugin
 			}
 			case 38:
 			{
-				ManualLogSource log13 = Log;
-				if (log13 != null)
+				ManualLogSource log12 = Log;
+				if (log12 != null)
 				{
-					log13.LogInfo((object)"[快捷键] 上光标 按下");
+					log12.LogInfo((object)"[快捷键] 上光标 按下");
 				}
 				if (_inNodeMode && _storylineNodes.Length != 0)
 				{
@@ -7289,10 +6787,10 @@ public class Plugin : BaseUnityPlugin
 			}
 			case 40:
 			{
-				ManualLogSource log7 = Log;
-				if (log7 != null)
+				ManualLogSource log2 = Log;
+				if (log2 != null)
 				{
-					log7.LogInfo((object)"[快捷键] 下光标 按下");
+					log2.LogInfo((object)"[快捷键] 下光标 按下");
 				}
 				if (_inNodeMode && _storylineNodes.Length != 0)
 				{
@@ -7337,15 +6835,14 @@ public class Plugin : BaseUnityPlugin
 			}
 			case 37:
 			{
-				ManualLogSource log11 = Log;
-				if (log11 != null)
+				ManualLogSource log3 = Log;
+				if (log3 != null)
 				{
-					log11.LogInfo((object)"[快捷键] 左光标 按下");
+					log3.LogInfo((object)"[快捷键] 左光标 按下");
 				}
 				if (_inSettingsMode && _settings.Length != 0)
 				{
-					SettingItem settingItem3 = _settings[_currentSettingIndex];
-					AdjustSettingValue(settingItem3, -1);
+					AdjustSettingValue(_settings[_currentSettingIndex], -1);
 					SpeakCurrentSetting();
 					_suppressCurrentKey = true;
 				}
@@ -7379,8 +6876,7 @@ public class Plugin : BaseUnityPlugin
 				}
 				if (_inSettingsMode && _settings.Length != 0)
 				{
-					SettingItem settingItem = _settings[_currentSettingIndex];
-					AdjustSettingValue(settingItem, 1);
+					AdjustSettingValue(_settings[_currentSettingIndex], 1);
 					SpeakCurrentSetting();
 					_suppressCurrentKey = true;
 				}
@@ -7413,22 +6909,30 @@ public class Plugin : BaseUnityPlugin
 		}
 		catch (Exception ex)
 		{
-			ManualLogSource log17 = Log;
-			if (log17 != null)
+			ManualLogSource log15 = Log;
+			if (log15 != null)
 			{
-				log17.LogError((object)("处理按键异常: " + ex.GetType().Name + " - " + ex.Message));
+				log15.LogError((object)("处理按键异常: " + ex.GetType().Name + " - " + ex.Message));
 			}
 		}
 	}
 
 	private static bool IsModifierKeyDown()
 	{
-		return IsKeyDown(VK_SHIFT) || IsKeyDown(VK_LSHIFT) || IsKeyDown(VK_RSHIFT) || IsKeyDown(VK_CONTROL) || IsKeyDown(VK_LCONTROL) || IsKeyDown(VK_RCONTROL) || IsKeyDown(VK_MENU) || IsKeyDown(VK_LMENU) || IsKeyDown(VK_RMENU) || IsKeyDown(VK_LWIN) || IsKeyDown(VK_RWIN);
+		if (!IsKeyDown(16) && !IsKeyDown(160) && !IsKeyDown(161) && !IsKeyDown(17) && !IsKeyDown(162) && !IsKeyDown(163) && !IsKeyDown(18) && !IsKeyDown(164) && !IsKeyDown(165) && !IsKeyDown(91))
+		{
+			return IsKeyDown(92);
+		}
+		return true;
 	}
 
 	private static bool IsModifierKey(int vkCode)
 	{
-		return vkCode == VK_SHIFT || vkCode == VK_LSHIFT || vkCode == VK_RSHIFT || vkCode == VK_CONTROL || vkCode == VK_LCONTROL || vkCode == VK_RCONTROL || vkCode == VK_MENU || vkCode == VK_LMENU || vkCode == VK_RMENU || vkCode == VK_LWIN || vkCode == VK_RWIN;
+		if (vkCode != 16 && vkCode != 160 && vkCode != 161 && vkCode != 17 && vkCode != 162 && vkCode != 163 && vkCode != 18 && vkCode != 164 && vkCode != 165 && vkCode != 91)
+		{
+			return vkCode == 92;
+		}
+		return true;
 	}
 
 	private static bool ShouldHandleKeyEvenWithModifier(int vkCode)
@@ -7444,19 +6948,26 @@ public class Plugin : BaseUnityPlugin
 	private static void LogInputState(string context)
 	{
 		ManualLogSource log = Log;
-		if (log == null)
+		if (log != null)
 		{
-			return;
+			string text = ((_options == null) ? "null" : _options.Length.ToString());
+			string text2 = ((_settings == null) ? "null" : _settings.Length.ToString());
+			string text3 = ((_storylineNodes == null) ? "null" : _storylineNodes.Length.ToString());
+			log.LogInfo((object)$"[诊断状态] {context}; UI={_currentUIState}; inOptions={_inOptionsMode}; options={text}; optionIndex={_currentOptionIndex}; inSettings={_inSettingsMode}; settings={text2}; settingIndex={_currentSettingIndex}; inNode={_inNodeMode}; nodes={text3}; nodeIndex={_currentNodeIndex}; signature={_lastDetectedSignature}");
 		}
-		string text = (_options == null) ? "null" : _options.Length.ToString();
-		string text2 = (_settings == null) ? "null" : _settings.Length.ToString();
-		string text3 = (_storylineNodes == null) ? "null" : _storylineNodes.Length.ToString();
-		log.LogInfo((object)$"[诊断状态] {context}; UI={_currentUIState}; inOptions={_inOptionsMode}; options={text}; optionIndex={_currentOptionIndex}; inSettings={_inSettingsMode}; settings={text2}; settingIndex={_currentSettingIndex}; inNode={_inNodeMode}; nodes={text3}; nodeIndex={_currentNodeIndex}; signature={_lastDetectedSignature}");
 	}
 
 	private static bool IsDigitShortcut(int vkCode)
 	{
-		return (vkCode >= 49 && vkCode <= 57) || (vkCode >= 97 && vkCode <= 105);
+		if (vkCode < 49 || vkCode > 57)
+		{
+			if (vkCode >= 97)
+			{
+				return vkCode <= 105;
+			}
+			return false;
+		}
+		return true;
 	}
 
 	private static int DigitShortcutIndex(int vkCode)
@@ -7487,8 +6998,7 @@ public class Plugin : BaseUnityPlugin
 		{
 			return false;
 		}
-		OptionItem optionItem = _options[num];
-		if (!IsGameControllerStoryOption(optionItem))
+		if (!IsGameControllerStoryOption(_options[num]))
 		{
 			return false;
 		}
@@ -7518,115 +7028,117 @@ public class Plugin : BaseUnityPlugin
 				PlayGameSound("Highlight");
 				TolkHelper.Speak(optionItem.Text, interrupt: true);
 				Log.LogInfo((object)"[故事线] 重读跳转失败提示，不执行点击");
-				return;
-			}
-			if (TryActivateEndingPageOption(optionItem))
-			{
-				return;
-			}
-			bool flag3 = IsCurrentOptionsConfirmationDialog() && IsConfirmationDialogOption(optionItem);
-			bool flag = !string.IsNullOrEmpty(optionItem.Text) && (optionItem.Text.Contains("返回") || optionItem.Text.Contains("关闭") || optionItem.Text.Equals("Back", StringComparison.OrdinalIgnoreCase));
-			bool flag2 = optionItem.ChapterInfo != null;
-			PlayGameSound(flag ? "Back" : "Click");
-			TolkHelper.Speak("点击 " + optionItem.Text, interrupt: true);
-			if (flag2)
-			{
-				ClearNodeMode("Click storyline chapter");
-				TryEnterStorylineChapterDirect(optionItem.ChapterInfo?.ChapterNumber ?? 0);
-			}
-			if (optionItem.Index >= 0 && optionItem.ClickableComponent != null && _gameControllerType != null && optionItem.ClickableComponent.GetType() == _gameControllerType)
-			{
-				ManualLogSource log2 = Log;
-				if (log2 != null)
-				{
-					log2.LogInfo((object)"通过GameController.OnOptionButtonClick点击选项");
-				}
-				try
-				{
-					MethodInfo method = _gameControllerType.GetMethod("OnOptionButtonClick", BindingFlags.Instance | BindingFlags.NonPublic);
-					if (method != null)
-					{
-						method.Invoke(optionItem.ClickableComponent, new object[1] { optionItem.Index });
-						ManualLogSource log3 = Log;
-						if (log3 != null)
-						{
-							log3.LogInfo((object)"OnOptionButtonClick调用成功");
-						}
-						ClearCurrentOptionsAfterGameSelection();
-						return;
-					}
-				}
-				catch (Exception ex)
-				{
-					ManualLogSource log4 = Log;
-					if (log4 != null)
-					{
-						log4.LogWarning((object)("OnOptionButtonClick调用失败: " + ex.Message));
-					}
-				}
-			}
-			if (TryActivateKnownMainMenuOption(optionItem))
-			{
-				return;
-			}
-			if (IsExploreInteractionOption(optionItem) && TryActivateRevisitableContinue())
-			{
-				ClearCurrentOptionsAfterTransientClick("revisitable continue direct");
-				return;
-			}
-			if (optionItem.ClickableComponent != null)
-			{
-				ManualLogSource log5 = Log;
-				if (log5 != null)
-				{
-					log5.LogInfo((object)"尝试直接调用可点击组件的点击事件");
-				}
-				if (ClickComponent(optionItem.ClickableComponent))
-				{
-					ManualLogSource log6 = Log;
-					if (log6 != null)
-					{
-						log6.LogInfo((object)"组件点击成功");
-					}
-					if (flag2)
-					{
-						EnterNodeModeAfterChapterClick(optionItem.ChapterInfo?.ChapterNumber ?? 0);
-					}
-					if (flag3)
-					{
-						ClearCurrentOptionsAfterTransientClick("confirmation dialog click");
-					}
-					if (IsExploreInteractionOption(optionItem))
-					{
-						ClearCurrentOptionsAfterTransientClick("explore interaction click");
-					}
-					return;
-				}
-				ManualLogSource log7 = Log;
-				if (log7 != null)
-				{
-					log7.LogWarning((object)"组件点击失败，回退到模拟鼠标点击");
-				}
-			}
-			if (optionItem.HasScreenPosition)
-			{
-				ClickAt((int)optionItem.ScreenX, (int)optionItem.ScreenY);
 			}
 			else
 			{
-				ClickScreenCenter();
-			}
-			if (flag2)
-			{
-				EnterNodeModeAfterChapterClick(optionItem.ChapterInfo?.ChapterNumber ?? 0);
-			}
-			if (flag3)
-			{
-				ClearCurrentOptionsAfterTransientClick("confirmation dialog mouse click");
-			}
-			if (IsExploreInteractionOption(optionItem))
-			{
-				ClearCurrentOptionsAfterTransientClick("explore interaction mouse click");
+				if (TryActivateEndingPageOption(optionItem))
+				{
+					return;
+				}
+				bool flag = IsCurrentOptionsConfirmationDialog() && IsConfirmationDialogOption(optionItem);
+				bool num = !string.IsNullOrEmpty(optionItem.Text) && (optionItem.Text.Contains("返回") || optionItem.Text.Contains("关闭") || optionItem.Text.Equals("Back", StringComparison.OrdinalIgnoreCase));
+				bool flag2 = optionItem.ChapterInfo != null;
+				PlayGameSound(num ? "Back" : "Click");
+				TolkHelper.Speak("点击 " + optionItem.Text, interrupt: true);
+				if (flag2)
+				{
+					ClearNodeMode("Click storyline chapter");
+					TryEnterStorylineChapterDirect(optionItem.ChapterInfo?.ChapterNumber ?? 0);
+				}
+				if (optionItem.Index >= 0 && optionItem.ClickableComponent != null && _gameControllerType != null && optionItem.ClickableComponent.GetType() == _gameControllerType)
+				{
+					ManualLogSource log2 = Log;
+					if (log2 != null)
+					{
+						log2.LogInfo((object)"通过GameController.OnOptionButtonClick点击选项");
+					}
+					try
+					{
+						MethodInfo method = _gameControllerType.GetMethod("OnOptionButtonClick", BindingFlags.Instance | BindingFlags.NonPublic);
+						if (method != null)
+						{
+							method.Invoke(optionItem.ClickableComponent, new object[1] { optionItem.Index });
+							ManualLogSource log3 = Log;
+							if (log3 != null)
+							{
+								log3.LogInfo((object)"OnOptionButtonClick调用成功");
+							}
+							ClearCurrentOptionsAfterGameSelection();
+							return;
+						}
+					}
+					catch (Exception ex)
+					{
+						ManualLogSource log4 = Log;
+						if (log4 != null)
+						{
+							log4.LogWarning((object)("OnOptionButtonClick调用失败: " + ex.Message));
+						}
+					}
+				}
+				if (TryActivateKnownMainMenuOption(optionItem))
+				{
+					return;
+				}
+				if (TryActivateRevisitableContinue(optionItem))
+				{
+					ClearCurrentOptionsAfterTransientClick("revisitable continue direct");
+					return;
+				}
+				if (optionItem.ClickableComponent != null)
+				{
+					ManualLogSource log5 = Log;
+					if (log5 != null)
+					{
+						log5.LogInfo((object)"尝试直接调用可点击组件的点击事件");
+					}
+					if (ClickComponent(optionItem.ClickableComponent))
+					{
+						ManualLogSource log6 = Log;
+						if (log6 != null)
+						{
+							log6.LogInfo((object)"组件点击成功");
+						}
+						if (flag2)
+						{
+							EnterNodeModeAfterChapterClick(optionItem.ChapterInfo?.ChapterNumber ?? 0);
+						}
+						if (flag)
+						{
+							ClearCurrentOptionsAfterTransientClick("confirmation dialog click");
+						}
+						if (IsExploreInteractionOption(optionItem))
+						{
+							ClearCurrentOptionsAfterTransientClick("explore interaction click");
+						}
+						return;
+					}
+					ManualLogSource log7 = Log;
+					if (log7 != null)
+					{
+						log7.LogWarning((object)"组件点击失败，回退到模拟鼠标点击");
+					}
+				}
+				if (optionItem.HasScreenPosition)
+				{
+					ClickAt((int)optionItem.ScreenX, (int)optionItem.ScreenY);
+				}
+				else
+				{
+					ClickScreenCenter();
+				}
+				if (flag2)
+				{
+					EnterNodeModeAfterChapterClick(optionItem.ChapterInfo?.ChapterNumber ?? 0);
+				}
+				if (flag)
+				{
+					ClearCurrentOptionsAfterTransientClick("confirmation dialog mouse click");
+				}
+				if (IsExploreInteractionOption(optionItem))
+				{
+					ClearCurrentOptionsAfterTransientClick("explore interaction mouse click");
+				}
 			}
 		}
 		else
@@ -7648,9 +7160,10 @@ public class Plugin : BaseUnityPlugin
 		{
 			return false;
 		}
-		foreach (OptionItem optionItem in _options)
+		OptionItem[] options = _options;
+		for (int i = 0; i < options.Length; i++)
 		{
-			if (IsGameControllerStoryOption(optionItem))
+			if (IsGameControllerStoryOption(options[i]))
 			{
 				return true;
 			}
@@ -7660,16 +7173,33 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool IsGameControllerStoryOption(OptionItem optionItem)
 	{
-		return optionItem != null && optionItem.Index >= 0 && optionItem.ClickableComponent != null && _gameControllerType != null && optionItem.ClickableComponent.GetType() == _gameControllerType;
+		if (optionItem != null && optionItem.Index >= 0 && optionItem.ClickableComponent != null && _gameControllerType != null)
+		{
+			return optionItem.ClickableComponent.GetType() == _gameControllerType;
+		}
+		return false;
 	}
 
 	private static bool IsExploreInteractionOption(OptionItem optionItem)
 	{
-		string text = optionItem?.Text?.Trim();
-		return !string.IsNullOrEmpty(text) && (text.StartsWith("探索交互点", StringComparison.Ordinal) || text.Contains("了解完毕") || text.Equals("继续", StringComparison.Ordinal));
+		return IsRevisitableContinueText(optionItem?.Text);
 	}
 
-	private static bool TryActivateRevisitableContinue()
+	private static bool IsRevisitableContinueText(string text)
+	{
+		text = text?.Trim();
+		if (!string.IsNullOrEmpty(text))
+		{
+			if (!text.StartsWith("探索交互点", StringComparison.Ordinal) && !text.Contains("了解完毕") && !text.Contains("盘问完毕"))
+			{
+				return text.Equals("继续", StringComparison.Ordinal);
+			}
+			return true;
+		}
+		return false;
+	}
+
+	private static bool TryActivateRevisitableContinue(OptionItem optionItem)
 	{
 		if (_gameControllerType == null)
 		{
@@ -7686,41 +7216,21 @@ public class Plugin : BaseUnityPlugin
 			object fieldValue2 = GetFieldValue(fieldValue, "nextNodeAfterAllOptions");
 			object fieldValue3 = GetFieldValue(activeObject, "parentRevisitableNode");
 			Log.LogInfo((object)("[循环选项] 当前节点=" + GetGameNodeId(fieldValue) + ", nextNodeAfterAllOptions=" + GetGameNodeId(fieldValue2) + ", parentRevisitableNode=" + GetGameNodeId(fieldValue3)));
-			if (fieldValue != null && fieldValue2 == null)
+			if (!IsRevisitableContinueOption(optionItem, fieldValue))
 			{
-				object obj = FindRevisitableParentNodeForChild(fieldValue);
-				object fieldValue4 = GetFieldValue(obj, "nextNodeAfterAllOptions");
-				Log.LogInfo((object)("[循环选项] 反查父节点=" + GetGameNodeId(obj) + ", 父节点继续目标=" + GetGameNodeId(fieldValue4)));
-				if (obj != null && fieldValue4 != null)
-				{
-					MarkRevisitableOptionVisited(activeObject, obj, fieldValue);
-					SetFieldValue(activeObject, "parentRevisitableNode", obj);
-					MethodInfo method = _gameControllerType.GetMethod("PlayingEnded", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-					if (method != null)
-					{
-						method.Invoke(activeObject, null);
-						Log.LogInfo((object)("[循环选项] 已按父循环节点交给游戏处理继续: " + GetGameNodeId(obj)));
-						return true;
-					}
-				}
+				return false;
+			}
+			if (fieldValue != null && fieldValue2 != null && IsRevisitableOptionComplete(activeObject, fieldValue))
+			{
+				return ActivateGameNode(activeObject, fieldValue2, "[循环选项] 已从父循环节点直接进入继续节点: " + GetGameNodeId(fieldValue2));
+			}
+			if (TryActivateMappedRevisitableContinue(activeObject, fieldValue))
+			{
+				return true;
 			}
 			if (TryActivateKnownBrokenRevisitableContinue(activeObject, fieldValue))
 			{
 				return true;
-			}
-			if (fieldValue != null && fieldValue2 != null)
-			{
-				return ActivateGameNode(activeObject, fieldValue2, "[循环选项] 已直接进入全部选项后的继续节点");
-			}
-			if (fieldValue != null)
-			{
-				MethodInfo method2 = _gameControllerType.GetMethod("PlayingEnded", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-				if (method2 != null)
-				{
-					method2.Invoke(activeObject, null);
-					Log.LogInfo((object)"[循环选项] 已调用 GameController.PlayingEnded 处理继续");
-					return true;
-				}
 			}
 			return false;
 		}
@@ -7731,102 +7241,202 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
-	private static bool MarkRevisitableOptionVisited(object gameController, object parentNode, object childNode)
+	private static bool IsRevisitableContinueOption(OptionItem optionItem, object currentNode)
 	{
-		if (gameController == null || parentNode == null || childNode == null)
+		string text = optionItem?.Text?.Trim();
+		if (string.IsNullOrEmpty(text))
 		{
 			return false;
 		}
-		string gameNodeId = GetGameNodeId(parentNode);
-		if (string.IsNullOrWhiteSpace(gameNodeId) || gameNodeId == "<null>")
+		if (!IsRevisitableContinueText(text))
 		{
 			return false;
+		}
+		string gameNodeId = GetGameNodeId(currentNode);
+		if (!string.IsNullOrWhiteSpace(gameNodeId))
+		{
+			switch (gameNodeId)
+			{
+			case "<null>":
+				break;
+			case "03035":
+			case "03036":
+			case "03037":
+			case "03038":
+			case "03039":
+				return true;
+			default:
+				EnsureRevisitableLinkCache();
+				if (_revisitableChildLinks.ContainsKey(gameNodeId) || _revisitableContinueNodeIds.Contains(gameNodeId))
+				{
+					return true;
+				}
+				if (GetFieldValue(currentNode, "nextNodeAfterAllOptions") != null)
+				{
+					return GetFieldValue(currentNode, "options") != null;
+				}
+				return false;
+			}
+		}
+		return false;
+	}
+
+	private static bool TryActivateMappedRevisitableContinue(object gameController, object currentNode)
+	{
+		string gameNodeId = GetGameNodeId(currentNode);
+		if (gameController == null || string.IsNullOrWhiteSpace(gameNodeId) || gameNodeId == "<null>")
+		{
+			return false;
+		}
+		EnsureRevisitableLinkCache();
+		if (_revisitableContinueNodeIds.Contains(gameNodeId))
+		{
+			object fieldValue = GetFieldValue(currentNode, "nextNode");
+			if (fieldValue != null)
+			{
+				return ActivateGameNode(gameController, fieldValue, "[循环选项] 已从循环继续节点跳到后续节点: " + GetGameNodeId(fieldValue));
+			}
+		}
+		if (!_revisitableChildLinks.TryGetValue(gameNodeId, out var value))
+		{
+			object obj = FindRevisitableParentNodeForChild(currentNode);
+			if (obj != null)
+			{
+				value = CreateRevisitableLink(obj, currentNode);
+				if (value != null)
+				{
+					_revisitableChildLinks[gameNodeId] = value;
+				}
+			}
+		}
+		if (value == null || value.ParentNode == null)
+		{
+			return false;
+		}
+		MarkRevisitableOptionVisited(gameController, value.ParentNode, value.OptionIndex);
+		object obj2 = value.ContinueNode ?? GetFieldValue(value.ParentNode, "nextNodeAfterAllOptions");
+		if (obj2 != null)
+		{
+			return ActivateGameNode(gameController, obj2, "[循环选项] 已从子预览节点进入循环继续节点: " + GetGameNodeId(obj2));
+		}
+		return ActivateGameNode(gameController, value.ParentNode, "[循环选项] 已从子预览节点返回循环选项父节点: " + GetGameNodeId(value.ParentNode));
+	}
+
+	private static void EnsureRevisitableLinkCache()
+	{
+		if (_revisitableLinkCacheBuilt)
+		{
+			return;
 		}
 		try
 		{
-			List<object> list = EnumerateObjects(GetFieldValue(parentNode, "options")).ToList();
-			int num = FindRevisitableOptionIndex(list, childNode);
-			if (num < 0)
+			object gameNodeRegistry = GetGameNodeRegistry();
+			object? value = (gameNodeRegistry?.GetType().GetMethod("GetAllNodes", BindingFlags.Instance | BindingFlags.Public))?.Invoke(gameNodeRegistry, null);
+			int num = 0;
+			foreach (object item in EnumerateRevisitableRegistryNodeIds(value))
 			{
-				Log.LogDebug((object)("[循环选项] 未找到子节点对应的选项序号: 父节点=" + gameNodeId + ", 子节点=" + GetGameNodeId(childNode)));
-				return false;
-			}
-			object fieldValue = GetFieldValue(gameController, "revisitableOptionStates");
-			if (fieldValue == null)
-			{
-				InvokeNoArg(gameController, "InitializeRevisitableOptionStates");
-				fieldValue = GetFieldValue(gameController, "revisitableOptionStates");
-			}
-			if (fieldValue == null)
-			{
-				return false;
-			}
-			bool[] array = GetRevisitableVisitedArray(fieldValue, gameNodeId);
-			if (array == null || array.Length < list.Count)
-			{
-				bool[] array2 = new bool[list.Count];
-				if (array != null)
+				string text = item?.ToString();
+				if (string.IsNullOrWhiteSpace(text))
 				{
-					Array.Copy(array, array2, Math.Min(array.Length, array2.Length));
+					continue;
 				}
-				array = array2;
+				object gameNodeFromRegistry = GetGameNodeFromRegistry(text);
+				object fieldValue = GetFieldValue(gameNodeFromRegistry, "nextNodeAfterAllOptions");
+				object fieldValue2 = GetFieldValue(gameNodeFromRegistry, "options");
+				if (gameNodeFromRegistry == null || fieldValue == null || fieldValue2 == null)
+				{
+					continue;
+				}
+				int num2 = 0;
+				foreach (object item2 in EnumerateObjects(fieldValue2))
+				{
+					string gameNodeId = GetGameNodeId(GetFieldValue(item2, "node"));
+					if (!string.IsNullOrWhiteSpace(gameNodeId) && gameNodeId != "<null>")
+					{
+						_revisitableChildLinks[gameNodeId] = new RevisitableNodeLink
+						{
+							ParentNodeId = text,
+							ParentNode = gameNodeFromRegistry,
+							ContinueNode = fieldValue,
+							OptionIndex = num2
+						};
+						num++;
+					}
+					num2++;
+				}
+				string gameNodeId2 = GetGameNodeId(fieldValue);
+				if (!string.IsNullOrWhiteSpace(gameNodeId2) && gameNodeId2 != "<null>")
+				{
+					_revisitableContinueNodeIds.Add(gameNodeId2);
+				}
 			}
-			array[num] = true;
-			if (!SetRevisitableVisitedArray(fieldValue, gameNodeId, array))
-			{
-				return false;
-			}
-			Log.LogInfo((object)("[循环选项] 已标记循环选项为访问过: 父节点=" + gameNodeId + ", 选项=" + (num + 1) + "/" + list.Count));
-			return true;
+			_revisitableLinkCacheBuilt = num > 0;
+			Log.LogInfo((object)("[循环选项] 已建立通用循环节点映射: 子节点 " + num + " 个, 继续节点 " + _revisitableContinueNodeIds.Count + " 个"));
 		}
 		catch (Exception ex)
 		{
-			Log.LogDebug((object)("[循环选项] 标记选项访问状态失败: " + ex.Message));
-			return false;
+			_revisitableLinkCacheBuilt = false;
+			Log.LogDebug((object)("[循环选项] 建立通用循环节点映射失败: " + ex.Message));
 		}
 	}
 
-	private static int FindRevisitableOptionIndex(List<object> options, object childNode)
+	private static object GetGameNodeRegistry()
 	{
-		if (options == null || childNode == null)
+		Type type = Type.GetType("GameNodeRegistry, Assembly-CSharp");
+		object obj = GetActiveObject(type);
+		if (obj == null)
 		{
-			return -1;
+			obj = (type?.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public))?.GetValue(null);
 		}
-		string gameNodeId = GetGameNodeId(childNode);
-		for (int i = 0; i < options.Count; i++)
-		{
-			object fieldValue = GetFieldValue(options[i], "node");
-			if (fieldValue != null && (object.ReferenceEquals(fieldValue, childNode) || (!string.IsNullOrWhiteSpace(gameNodeId) && gameNodeId != "<null>" && gameNodeId == GetGameNodeId(fieldValue))))
-			{
-				return i;
-			}
-		}
-		return -1;
+		return obj;
 	}
 
-	private static bool[] GetRevisitableVisitedArray(object states, string nodeId)
+	private static IEnumerable<object> EnumerateRevisitableRegistryNodeIds(object value)
 	{
-		if (states == null || string.IsNullOrWhiteSpace(nodeId))
+		if (value is IDictionary dictionary)
 		{
-			return null;
-		}
-		try
-		{
-			MethodInfo method = states.GetType().GetMethod("TryGetValue", new Type[2]
+			foreach (object key in dictionary.Keys)
 			{
-				typeof(string),
-				typeof(bool[]).MakeByRefType()
-			});
-			if (method != null)
-			{
-				object[] array = new object[2] { nodeId, null };
-				if (method.Invoke(states, array) is bool flag && flag)
+				if (IsRevisitableNodeMapping(dictionary[key]))
 				{
-					return array[1] as bool[];
+					yield return key;
 				}
 			}
-			PropertyInfo property = states.GetType().GetProperty("Item");
-			return property?.GetValue(states, new object[1] { nodeId }) as bool[];
+			yield break;
+		}
+		foreach (object item in EnumerateObjects(value))
+		{
+			if (item is DictionaryEntry dictionaryEntry)
+			{
+				if (IsRevisitableNodeMapping(dictionaryEntry.Value))
+				{
+					yield return dictionaryEntry.Key;
+				}
+				continue;
+			}
+			object obj = GetFieldValue(item, "Key") ?? GetPropertyValue(item, "Key");
+			object mapping = GetFieldValue(item, "Value") ?? GetPropertyValue(item, "Value");
+			if (obj != null && IsRevisitableNodeMapping(mapping))
+			{
+				yield return obj;
+			}
+		}
+	}
+
+	private static bool IsRevisitableNodeMapping(object mapping)
+	{
+		return (GetFieldValue(mapping, "nodeType") ?? GetPropertyValue(mapping, "nodeType"))?.ToString().Equals("RevisitableOptionNode", StringComparison.Ordinal) ?? false;
+	}
+
+	private static object GetPropertyValue(object obj, string propertyName)
+	{
+		if (obj == null || string.IsNullOrEmpty(propertyName))
+		{
+			return null;
+		}
+		try
+		{
+			return obj.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)?.GetValue(obj, null);
 		}
 		catch
 		{
@@ -7834,35 +7444,119 @@ public class Plugin : BaseUnityPlugin
 		}
 	}
 
-	private static bool SetRevisitableVisitedArray(object states, string nodeId, bool[] visited)
+	private static RevisitableNodeLink CreateRevisitableLink(object parentNode, object childNode)
 	{
-		if (states == null || string.IsNullOrWhiteSpace(nodeId) || visited == null)
+		object fieldValue = GetFieldValue(parentNode, "options");
+		object fieldValue2 = GetFieldValue(parentNode, "nextNodeAfterAllOptions");
+		if (fieldValue == null || fieldValue2 == null)
 		{
-			return false;
+			return null;
+		}
+		string gameNodeId = GetGameNodeId(childNode);
+		int num = 0;
+		foreach (object item in EnumerateObjects(fieldValue))
+		{
+			object fieldValue3 = GetFieldValue(item, "node");
+			if (fieldValue3 == childNode || gameNodeId == GetGameNodeId(fieldValue3))
+			{
+				return new RevisitableNodeLink
+				{
+					ParentNodeId = GetGameNodeId(parentNode),
+					ParentNode = parentNode,
+					ContinueNode = fieldValue2,
+					OptionIndex = num
+				};
+			}
+			num++;
+		}
+		return null;
+	}
+
+	private static void MarkRevisitableOptionVisited(object gameController, object parentNode, int optionIndex)
+	{
+		if (gameController == null || parentNode == null || optionIndex < 0)
+		{
+			return;
 		}
 		try
 		{
-			PropertyInfo property = states.GetType().GetProperty("Item");
-			if (property != null)
+			object fieldValue = GetFieldValue(gameController, "revisitableOptionStates");
+			string gameNodeId = GetGameNodeId(parentNode);
+			int revisitableOptionCount = GetRevisitableOptionCount(parentNode);
+			if (fieldValue is Dictionary<string, bool[]> dictionary)
 			{
-				property.SetValue(states, visited, new object[1] { nodeId });
-				return true;
-			}
-			MethodInfo method = states.GetType().GetMethod("Add", new Type[2]
-			{
-				typeof(string),
-				typeof(bool[])
-			});
-			if (method != null)
-			{
-				method.Invoke(states, new object[2] { nodeId, visited });
-				return true;
+				if (!dictionary.TryGetValue(gameNodeId, out var value) || value == null || value.Length < revisitableOptionCount)
+				{
+					value = (dictionary[gameNodeId] = new bool[revisitableOptionCount]);
+				}
+				if (optionIndex < value.Length)
+				{
+					value[optionIndex] = true;
+				}
 			}
 		}
-		catch
+		catch (Exception ex)
 		{
+			Log.LogDebug((object)("[循环选项] 标记循环选项访问状态失败: " + ex.Message));
 		}
-		return false;
+	}
+
+	private static bool IsRevisitableOptionComplete(object gameController, object parentNode)
+	{
+		try
+		{
+			if (gameController == null || parentNode == null)
+			{
+				return false;
+			}
+			string gameNodeId = GetGameNodeId(parentNode);
+			int revisitableOptionCount = GetRevisitableOptionCount(parentNode);
+			if (string.IsNullOrWhiteSpace(gameNodeId) || gameNodeId == "<null>" || revisitableOptionCount <= 0)
+			{
+				return false;
+			}
+			if (!(GetFieldValue(gameController, "revisitableOptionStates") is Dictionary<string, bool[]> dictionary) || !dictionary.TryGetValue(gameNodeId, out var value) || value == null)
+			{
+				return false;
+			}
+			int num = 0;
+			for (int i = 0; i < value.Length; i++)
+			{
+				if (value[i])
+				{
+					num++;
+				}
+			}
+			int num2 = 0;
+			if (GetFieldValue(parentNode, "requiredVisitedOptionCountBeforeNext") is int num3)
+			{
+				num2 = num3;
+			}
+			if (num2 <= 0 || num2 > revisitableOptionCount)
+			{
+				num2 = revisitableOptionCount;
+			}
+			Log.LogInfo((object)("[循环选项] 父节点 " + gameNodeId + " 已访问 " + num + "/" + num2));
+			return num >= num2;
+		}
+		catch (Exception ex)
+		{
+			Log.LogDebug((object)("[循环选项] 判断循环选项完成状态失败: " + ex.Message));
+			return false;
+		}
+	}
+
+	private static int GetRevisitableOptionCount(object node)
+	{
+		int num = 0;
+		foreach (object item in EnumerateObjects(GetFieldValue(node, "options")))
+		{
+			if (item != null)
+			{
+				num++;
+			}
+		}
+		return num;
 	}
 
 	private static bool TryActivateKnownBrokenRevisitableContinue(object gameController, object currentNode)
@@ -7874,20 +7568,24 @@ public class Plugin : BaseUnityPlugin
 		}
 		if (gameNodeId == "03039")
 		{
-			object gameNode2 = GetFieldValue(currentNode, "nextNode") ?? GetGameNodeFromRegistry("03040");
-			return gameNode2 != null && ActivateGameNode(gameController, gameNode2, "[循环选项] 已从继续节点跳到后续节点: " + GetGameNodeId(gameNode2));
+			object obj = GetFieldValue(currentNode, "nextNode") ?? GetGameNodeFromRegistry("03040");
+			if (obj != null)
+			{
+				return ActivateGameNode(gameController, obj, "[循环选项] 已从继续节点跳到后续节点: " + GetGameNodeId(obj));
+			}
+			return false;
 		}
 		if (gameNodeId != "03035" && gameNodeId != "03036" && gameNodeId != "03037" && gameNodeId != "03038")
 		{
 			return false;
 		}
-		object gameNode = GetGameNodeFromRegistry("03039") ?? GetGameNodeFromRegistry("03040");
-		if (gameNode == null)
+		object obj2 = GetGameNodeFromRegistry("03039") ?? GetGameNodeFromRegistry("03040");
+		if (obj2 == null)
 		{
-			Log.LogWarning((object)("[循环选项] 无法从 GameNodeRegistry 获取 03039/03040"));
+			Log.LogWarning((object)"[循环选项] 无法从 GameNodeRegistry 获取 03039/03040");
 			return false;
 		}
-		if (ActivateGameNode(gameController, gameNode, "[循环选项] 已针对谁是主谋预览节点跳到继续节点: " + GetGameNodeId(gameNode)))
+		if (ActivateGameNode(gameController, obj2, "[循环选项] 已针对谁是主谋预览节点跳到继续节点: " + GetGameNodeId(obj2)))
 		{
 			return true;
 		}
@@ -7907,20 +7605,18 @@ public class Plugin : BaseUnityPlugin
 		try
 		{
 			Type type = Type.GetType("GameNodeRegistry, Assembly-CSharp");
-			object activeObject = GetActiveObject(type);
-			if (activeObject == null)
+			object obj = GetActiveObject(type);
+			if (obj == null)
 			{
-				PropertyInfo property = type?.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public);
-				activeObject = property?.GetValue(null);
+				obj = (type?.GetProperty("Instance", BindingFlags.Static | BindingFlags.Public))?.GetValue(null);
 			}
-			MethodInfo method = type?.GetMethod("GetGameNode", BindingFlags.Instance | BindingFlags.Public);
-			object obj = method?.Invoke(activeObject, new object[1] { nodeId });
-			if (obj != null)
+			object obj2 = (type?.GetMethod("GetGameNode", BindingFlags.Instance | BindingFlags.Public))?.Invoke(obj, new object[1] { nodeId });
+			if (obj2 != null)
 			{
-				_gameNodeCache[nodeId] = obj;
+				_gameNodeCache[nodeId] = obj2;
 				Log.LogInfo((object)("[循环选项] 从 GameNodeRegistry 获取节点成功: " + nodeId));
 			}
-			return obj;
+			return obj2;
 		}
 		catch (Exception ex)
 		{
@@ -7965,15 +7661,15 @@ public class Plugin : BaseUnityPlugin
 		string gameNodeId = GetGameNodeId(childNode);
 		try
 		{
-			Array array = FindObjectsOfType(_gameNodeType);
-			object obj = FindRevisitableParentNodeForChild(childNode, gameNodeId, array);
+			Array candidates = FindObjectsOfType(_gameNodeType);
+			object obj = FindRevisitableParentNodeForChild(childNode, gameNodeId, candidates);
 			if (obj != null)
 			{
 				return obj;
 			}
-			Type type = Type.GetType("GameNodeRegistry, Assembly-CSharp");
-			object activeObject = GetActiveObject(type);
-			foreach (string fieldName in new string[6] { "allNodes", "nodes", "gameNodes", "nodeList", "nodeRegistry", "nodeMap" })
+			object activeObject = GetActiveObject(Type.GetType("GameNodeRegistry, Assembly-CSharp"));
+			string[] array = new string[6] { "allNodes", "nodes", "gameNodes", "nodeList", "nodeRegistry", "nodeMap" };
+			foreach (string fieldName in array)
 			{
 				obj = FindRevisitableParentNodeForChild(childNode, gameNodeId, GetFieldValue(activeObject, fieldName));
 				if (obj != null)
@@ -7991,9 +7687,9 @@ public class Plugin : BaseUnityPlugin
 
 	private static object FindRevisitableParentNodeForChild(object childNode, string childNodeId, object candidates)
 	{
-		foreach (object candidate in EnumerateObjects(candidates))
+		foreach (object item in EnumerateObjects(candidates))
 		{
-			object obj = ExtractGameNode(candidate);
+			object obj = ExtractGameNode(item);
 			if (obj == null)
 			{
 				continue;
@@ -8003,14 +7699,10 @@ public class Plugin : BaseUnityPlugin
 			{
 				continue;
 			}
-			foreach (object item in EnumerateObjects(fieldValue))
+			foreach (object item2 in EnumerateObjects(fieldValue))
 			{
-				object fieldValue2 = GetFieldValue(item, "node");
-				if (fieldValue2 == null)
-				{
-					continue;
-				}
-				if (object.ReferenceEquals(fieldValue2, childNode) || (!string.IsNullOrWhiteSpace(childNodeId) && childNodeId != "<null>" && childNodeId == GetGameNodeId(fieldValue2)))
+				object fieldValue2 = GetFieldValue(item2, "node");
+				if (fieldValue2 != null && (fieldValue2 == childNode || (!string.IsNullOrWhiteSpace(childNodeId) && childNodeId != "<null>" && childNodeId == GetGameNodeId(fieldValue2))))
 				{
 					return obj;
 				}
@@ -8029,7 +7721,7 @@ public class Plugin : BaseUnityPlugin
 		{
 			return value;
 		}
-		if (value is System.Collections.DictionaryEntry dictionaryEntry)
+		if (value is DictionaryEntry dictionaryEntry)
 		{
 			return ExtractGameNode(dictionaryEntry.Value) ?? ExtractGameNode(dictionaryEntry.Key);
 		}
@@ -8043,6 +7735,7 @@ public class Plugin : BaseUnityPlugin
 
 	private static string GetGameNodeId(object node)
 	{
+		//IL_002d: Unknown result type (might be due to invalid IL or missing references)
 		if (node == null)
 		{
 			return "<null>";
@@ -8054,10 +7747,10 @@ public class Plugin : BaseUnityPlugin
 			{
 				return fieldValue.ToString();
 			}
-			object obj = node as UnityEngine.Object;
+			object obj = ((node is Object) ? node : null);
 			if (obj != null)
 			{
-				return ((UnityEngine.Object)obj).name;
+				return ((Object)obj).name;
 			}
 		}
 		catch
@@ -8086,7 +7779,11 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool IsCurrentOptionsConfirmationDialog()
 	{
-		return _options != null && GetConfirmationDialogOptions(_options).Length >= 2;
+		if (_options != null)
+		{
+			return GetConfirmationDialogOptions(_options).Length >= 2;
+		}
+		return false;
 	}
 
 	private static void ClearCurrentOptionsAfterTransientClick(string reason)
@@ -8103,31 +7800,29 @@ public class Plugin : BaseUnityPlugin
 
 	private static void ClearCurrentOptionsAfterGameSelection()
 	{
-		if (!AreCurrentOptionsFromGameController())
+		if (AreCurrentOptionsFromGameController())
 		{
-			return;
+			_inOptionsMode = false;
+			_options = new OptionItem[0];
+			_currentOptionIndex = 0;
+			_optionsMissCount = 0;
+			_currentUIState = UIState.Unknown;
+			_lastDetectedSignature = "";
+			_ignoreOptionsUntilUtc = DateTime.UtcNow.AddSeconds(1.5);
+			MarkNeedDetect();
+			LogInputState("Clear options after game selection");
 		}
-		_inOptionsMode = false;
-		_options = new OptionItem[0];
-		_currentOptionIndex = 0;
-		_optionsMissCount = 0;
-		_currentUIState = UIState.Unknown;
-		_lastDetectedSignature = "";
-		_ignoreOptionsUntilUtc = DateTime.UtcNow.AddSeconds(1.5);
-		MarkNeedDetect();
-		LogInputState("Clear options after game selection");
 	}
 
 	private static void ClearNodeMode(string reason)
 	{
-		if (!_inNodeMode && (_storylineNodes == null || _storylineNodes.Length == 0) && _currentNodeIndex == 0)
+		if (_inNodeMode || (_storylineNodes != null && _storylineNodes.Length != 0) || _currentNodeIndex != 0)
 		{
-			return;
+			_inNodeMode = false;
+			_storylineNodes = new OptionItem[0];
+			_currentNodeIndex = 0;
+			LogInputState("Clear node mode: " + reason);
 		}
-		_inNodeMode = false;
-		_storylineNodes = new OptionItem[0];
-		_currentNodeIndex = 0;
-		LogInputState("Clear node mode: " + reason);
 	}
 
 	private static bool TryActivateEndingPageOption(OptionItem optionItem)
@@ -8137,11 +7832,11 @@ public class Plugin : BaseUnityPlugin
 			return false;
 		}
 		string text = null;
-		if (optionItem.Index == ENDING_ACTION_RETURN_STORYLINE)
+		if (optionItem.Index == -9001)
 		{
 			text = "OnReturnToMainClick";
 		}
-		else if (optionItem.Index == ENDING_ACTION_GOTO_STORYLINE)
+		else if (optionItem.Index == -9002)
 		{
 			text = "OnGotoStorylineClick";
 		}
@@ -8153,7 +7848,7 @@ public class Plugin : BaseUnityPlugin
 		{
 			PlayGameSound("Click");
 			TolkHelper.Speak("点击 " + optionItem.Text, interrupt: true);
-			MethodInfo method = _endingPageControllerType.GetMethod(text, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+			MethodInfo method = _endingPageControllerType.GetMethod(text, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 			if (method == null)
 			{
 				Log.LogWarning((object)("[结尾页] 未找到方法: " + text));
@@ -8231,33 +7926,33 @@ public class Plugin : BaseUnityPlugin
 			{
 				return false;
 			}
-			string methodName = null;
+			string text2 = null;
 			if (text.Contains("系统设置") || text.Contains("设置"))
 			{
-				methodName = "LoadSettings";
+				text2 = "LoadSettings";
 			}
 			else if (text.Contains("档案"))
 			{
-				methodName = "OpenArchives";
+				text2 = "OpenArchives";
 			}
 			else if (text.Contains("排行榜") || text.Contains("投票"))
 			{
-				methodName = "OpenVotePage";
+				text2 = "OpenVotePage";
 			}
 			else if (text.Contains("退出"))
 			{
-				methodName = "ExitGame";
+				text2 = "ExitGame";
 			}
-			if (methodName == null)
+			if (text2 == null)
 			{
 				return false;
 			}
-			MethodInfo method = type.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public);
+			MethodInfo method = type.GetMethod(text2, BindingFlags.Instance | BindingFlags.Public);
 			if (method == null)
 			{
 				return false;
 			}
-			Log.LogInfo((object)("[主菜单] 直接调用 MainMenuManager." + methodName + " 处理: " + text));
+			Log.LogInfo((object)("[主菜单] 直接调用 MainMenuManager." + text2 + " 处理: " + text));
 			method.Invoke(activeObject, null);
 			MarkNeedDetect();
 			return true;
@@ -8271,24 +7966,23 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool TryStartGameFromMenu(string text)
 	{
-		bool flag = false;
+		bool result = false;
 		try
 		{
-			Type type = Type.GetType("IntroAnimationController, Assembly-CSharp");
-			object activeObject = GetActiveObject(type);
+			object activeObject = GetActiveObject(Type.GetType("IntroAnimationController, Assembly-CSharp"));
 			if (activeObject != null)
 			{
-				bool flag2 = GetBoolProperty(activeObject, "IsPlaying");
-				bool flag3 = GetBoolProperty(activeObject, "HasPlayed");
-				Log.LogInfo((object)$"[主菜单] Intro 状态 IsPlaying={flag2}, HasPlayed={flag3}");
-				if (flag2)
+				bool boolProperty = GetBoolProperty(activeObject, "IsPlaying");
+				bool boolProperty2 = GetBoolProperty(activeObject, "HasPlayed");
+				Log.LogInfo((object)$"[主菜单] Intro 状态 IsPlaying={boolProperty}, HasPlayed={boolProperty2}");
+				if (boolProperty)
 				{
 					MethodInfo method = activeObject.GetType().GetMethod("EndIntro", BindingFlags.Instance | BindingFlags.NonPublic);
 					if (method != null)
 					{
 						method.Invoke(activeObject, null);
 						Log.LogInfo((object)"[主菜单] 已结束开场动画阻塞");
-						flag = true;
+						result = true;
 					}
 				}
 			}
@@ -8303,14 +7997,14 @@ public class Plugin : BaseUnityPlugin
 			if (activeObject2 == null)
 			{
 				Log.LogWarning((object)"[主菜单] 未找到 GameController，不能直接启动");
-				return flag;
+				return result;
 			}
-			string text2 = text.Contains("继续") ? "ContinuePlay" : "StartPlay";
+			string text2 = (text.Contains("继续") ? "ContinuePlay" : "StartPlay");
 			MethodInfo method2 = activeObject2.GetType().GetMethod(text2, BindingFlags.Instance | BindingFlags.Public);
 			if (method2 == null)
 			{
 				Log.LogWarning((object)("[主菜单] GameController 未找到方法: " + text2));
-				return flag;
+				return result;
 			}
 			Log.LogInfo((object)("[主菜单] 直接调用 GameController." + text2 + " 处理: " + text));
 			method2.Invoke(activeObject2, null);
@@ -8320,7 +8014,7 @@ public class Plugin : BaseUnityPlugin
 		catch (Exception ex2)
 		{
 			Log.LogWarning((object)("[主菜单] 直接启动游戏失败: " + ex2.Message));
-			return flag;
+			return result;
 		}
 	}
 
@@ -8342,20 +8036,17 @@ public class Plugin : BaseUnityPlugin
 				}
 			}
 			object activeObject2 = GetActiveObject(_gameControllerType);
-			object obj = GetFieldValue(activeObject, "storyLinePageToggle") ?? GetFieldValue(activeObject2, "storyLinePageToggle");
-			if (InvokeNoArg(obj, "PerformShow"))
+			if (InvokeNoArg(GetFieldValue(activeObject, "storyLinePageToggle") ?? GetFieldValue(activeObject2, "storyLinePageToggle"), "PerformShow"))
 			{
 				Log.LogInfo((object)"[主菜单] storyLinePageToggle.PerformShow 成功");
 				flag = true;
 			}
-			object obj2 = GetFieldValue(activeObject, "chapterStorylineController") ?? GetFieldValue(activeObject2, "chapterStorylineController") ?? GetActiveObject(_chapterStorylineControllerType);
-			if (InvokeNoArg(obj2, "ShowChapterSelection"))
+			if (InvokeNoArg(GetFieldValue(activeObject, "chapterStorylineController") ?? GetFieldValue(activeObject2, "chapterStorylineController") ?? GetActiveObject(_chapterStorylineControllerType), "ShowChapterSelection"))
 			{
 				Log.LogInfo((object)"[主菜单] ChapterStorylineController.ShowChapterSelection 成功");
 				flag = true;
 			}
-			object obj3 = GetFieldValue(activeObject2, "storylineUIManager") ?? GetActiveObject(_storylineUIManagerType);
-			if (InvokeNoArg(obj3, "ShowChapterSelection"))
+			if (InvokeNoArg(GetFieldValue(activeObject2, "storylineUIManager") ?? GetActiveObject(_storylineUIManagerType), "ShowChapterSelection"))
 			{
 				Log.LogInfo((object)"[主菜单] StorylineUIManager.ShowChapterSelection 成功");
 				flag = true;
@@ -8451,13 +8142,21 @@ public class Plugin : BaseUnityPlugin
 
 	private static bool HasPublicInvoke(object value)
 	{
-		return value != null && value.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public) != null;
+		if (value != null)
+		{
+			return value.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public) != null;
+		}
+		return false;
 	}
 
 	private static bool HasNoArgMethod(Type type, string methodName)
 	{
-		MethodInfo method = type?.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-		return method != null && method.GetParameters().Length == 0;
+		MethodInfo methodInfo = type?.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+		if (methodInfo != null)
+		{
+			return methodInfo.GetParameters().Length == 0;
+		}
+		return false;
 	}
 
 	private static bool TryInvokeEventLikeMember(Type type, object component, string memberName)
@@ -8474,16 +8173,16 @@ public class Plugin : BaseUnityPlugin
 				return false;
 			}
 			ParameterInfo[] parameters = method.GetParameters();
-			object[] parameters2 = null;
+			object[] array = null;
 			if (parameters.Length != 0)
 			{
-				parameters2 = new object[parameters.Length];
-				for (int i = 0; i < parameters2.Length; i++)
+				array = new object[parameters.Length];
+				for (int i = 0; i < array.Length; i++)
 				{
-					parameters2[i] = GetDefaultValue(parameters[i].ParameterType);
+					array[i] = GetDefaultValue(parameters[i].ParameterType);
 				}
 			}
-			method.Invoke(value, parameters2);
+			method.Invoke(value, array);
 			Log.LogInfo((object)(type.Name + "." + memberName + ".Invoke() 调用成功"));
 			return true;
 		}
@@ -8566,8 +8265,7 @@ public class Plugin : BaseUnityPlugin
 	private static void ClickScreenCenter()
 	{
 		int systemMetrics = GetSystemMetrics(0);
-		int y = GetSystemMetrics(1) / 2;
-		ClickAt(systemMetrics / 2, y);
+		ClickAt(y: GetSystemMetrics(1) / 2, x: systemMetrics / 2);
 	}
 
 	private static void ClickAt(int x, int y)
@@ -8605,9 +8303,9 @@ public class Plugin : BaseUnityPlugin
 			{
 				text = "（可点击）";
 			}
-			string text2 = (string.IsNullOrEmpty(optionItem.Text) ? "（无文字）" : optionItem.Text);
+			string obj = (string.IsNullOrEmpty(optionItem.Text) ? "（无文字）" : optionItem.Text);
 			PlayGameSound("Highlight");
-			TolkHelper.Speak(text2 + text, interrupt: true);
+			TolkHelper.Speak(obj + text, interrupt: true);
 		}
 	}
 
@@ -8642,11 +8340,6 @@ public class Plugin : BaseUnityPlugin
 		if (log2 != null)
 		{
 			log2.LogInfo((object)$"其中 {num} 个是可点击组件");
-			for (int j = 0; j < options.Length; j++)
-			{
-				OptionItem optionItem = options[j];
-				log2.LogInfo((object)$"[选项列表] {j + 1}/{options.Length}: {optionItem?.Text}, clickable={optionItem?.ClickableComponent != null}, pos=({optionItem?.ScreenX ?? 0f:F1},{optionItem?.ScreenY ?? 0f:F1}), hasPos={optionItem?.HasScreenPosition ?? false}");
-			}
 		}
 		SpeakCurrentOption();
 		LogInputState("SetOptions done");
@@ -8697,26 +8390,23 @@ public class Plugin : BaseUnityPlugin
 
 	public static void LeaveOptions()
 	{
-		if (true)
+		_inOptionsMode = false;
+		_options = new OptionItem[0];
+		_currentOptionIndex = 0;
+		_inSettingsMode = false;
+		_settings = new SettingItem[0];
+		_currentSettingIndex = 0;
+		_inStorylineMode = false;
+		_inNodeMode = false;
+		_storylineNodes = new OptionItem[0];
+		_currentNodeIndex = 0;
+		LeaveArchiveMode();
+		ManualLogSource log = Log;
+		if (log != null)
 		{
-			_inOptionsMode = false;
-			_options = new OptionItem[0];
-			_currentOptionIndex = 0;
-			_inSettingsMode = false;
-			_settings = new SettingItem[0];
-			_currentSettingIndex = 0;
-			_inStorylineMode = false;
-			_inNodeMode = false;
-			_storylineNodes = new OptionItem[0];
-			_currentNodeIndex = 0;
-			LeaveArchiveMode();
-			ManualLogSource log = Log;
-			if (log != null)
-			{
-				log.LogInfo((object)"离开选项/设置/节点模式");
-			}
-			LogInputState("LeaveOptions done");
+			log.LogInfo((object)"离开选项/设置/节点模式");
 		}
+		LogInputState("LeaveOptions done");
 	}
 
 	public static void RequestSpeak(string text)
@@ -8738,50 +8428,56 @@ public class Plugin : BaseUnityPlugin
 			{
 				log.LogDebug((object)("跳过测试字幕: " + text));
 			}
-			return;
 		}
-		if (string.IsNullOrEmpty(text) || text == _lastSpokenText)
+		else
 		{
-			return;
-		}
-		if (IsPriorityStatusText(text))
-		{
-			_lastSpokenText = text;
-			TolkHelper.Speak(text, interrupt: true);
-			ManualLogSource log = Log;
-			if (log != null)
+			if (string.IsNullOrEmpty(text) || text == _lastSpokenText)
 			{
-				log.LogInfo((object)("[状态提示] 优先朗读: " + text));
+				return;
+			}
+			if (IsPriorityStatusText(text))
+			{
+				_lastSpokenText = text;
+				TolkHelper.Speak(text, interrupt: true);
+				ManualLogSource log2 = Log;
+				if (log2 != null)
+				{
+					log2.LogInfo((object)("[状态提示] 优先朗读: " + text));
+				}
+				MarkNeedDetect();
+				return;
+			}
+			bool num = IsSubtitleTextComponent(textComponent);
+			bool flag = IsNarrationTextComponent(textComponent);
+			if (!num && !flag)
+			{
+				ManualLogSource log3 = Log;
+				if (log3 != null)
+				{
+					log3.LogDebug((object)("[自动朗读] 跳过非字幕/旁白文本: " + text));
+				}
+				MarkNeedDetect();
+				return;
+			}
+			if (!_subtitleSpeakEnabled)
+			{
+				ManualLogSource log4 = Log;
+				if (log4 != null)
+				{
+					log4.LogDebug((object)("字幕朗读已关闭，跳过自动朗读: " + text));
+				}
+				_lastSpokenText = text;
+				return;
+			}
+			_lastSpokenText = text;
+			TolkHelper.Speak(text);
+			ManualLogSource log5 = Log;
+			if (log5 != null)
+			{
+				log5.LogDebug((object)("朗读: " + text));
 			}
 			MarkNeedDetect();
-			return;
 		}
-		bool flag = IsSubtitleTextComponent(textComponent);
-		bool flag2 = IsNarrationTextComponent(textComponent);
-		if (!flag && !flag2)
-		{
-			Log?.LogDebug((object)("[自动朗读] 跳过非字幕/旁白文本: " + text));
-			MarkNeedDetect();
-			return;
-		}
-		if (!_subtitleSpeakEnabled)
-		{
-			ManualLogSource log2 = Log;
-			if (log2 != null)
-			{
-				log2.LogDebug((object)("字幕朗读已关闭，跳过自动朗读: " + text));
-			}
-			_lastSpokenText = text;
-			return;
-		}
-		_lastSpokenText = text;
-		TolkHelper.Speak(text);
-		ManualLogSource log3 = Log;
-		if (log3 != null)
-		{
-			log3.LogDebug((object)("朗读: " + text));
-		}
-		MarkNeedDetect();
 	}
 
 	private static bool IsSubtitleTextComponent(object textComponent)
@@ -8791,7 +8487,11 @@ public class Plugin : BaseUnityPlugin
 			return false;
 		}
 		ResolveSubtitleTypes();
-		return _subtitleTextComponent != null && object.ReferenceEquals(textComponent, _subtitleTextComponent);
+		if (_subtitleTextComponent != null)
+		{
+			return textComponent == _subtitleTextComponent;
+		}
+		return false;
 	}
 
 	private static bool IsPriorityStatusText(string text)
@@ -8805,9 +8505,9 @@ public class Plugin : BaseUnityPlugin
 		{
 			return false;
 		}
-		bool flag = text2.Contains("好感") || text2.Contains("威望") || text2.Contains("亲密") || text2.Contains("信任");
-		bool flag2 = text2.Contains("增加") || text2.Contains("减少") || text2.Contains("上升") || text2.Contains("下降") || text2.Contains("+") || text2.Contains("-");
-		return flag && flag2;
+		bool num = text2.Contains("好感") || text2.Contains("威望") || text2.Contains("亲密") || text2.Contains("信任");
+		bool flag = text2.Contains("增加") || text2.Contains("减少") || text2.Contains("上升") || text2.Contains("下降") || text2.Contains("+") || text2.Contains("-");
+		return num && flag;
 	}
 
 	private static bool IsIgnoredAutoSpeakText(string text)
@@ -8817,7 +8517,11 @@ public class Plugin : BaseUnityPlugin
 			return true;
 		}
 		string text2 = text.Trim();
-		return text2.Contains("这是测试字幕") || text2.Contains("测试字幕") || text2.IndexOf("This is Test Subtitle", StringComparison.OrdinalIgnoreCase) >= 0 || text2.IndexOf("Test Subtitle", StringComparison.OrdinalIgnoreCase) >= 0;
+		if (!text2.Contains("这是测试字幕") && !text2.Contains("测试字幕") && text2.IndexOf("This is Test Subtitle", StringComparison.OrdinalIgnoreCase) < 0)
+		{
+			return text2.IndexOf("Test Subtitle", StringComparison.OrdinalIgnoreCase) >= 0;
+		}
+		return true;
 	}
 
 	private static void DetectOptions()
@@ -8840,8 +8544,7 @@ public class Plugin : BaseUnityPlugin
 			Log.LogInfo((object)$"共找到 {allVisibleTextsWithPosition.Length} 段文字");
 			List<OptionItem> list = new List<OptionItem>();
 			OptionItem[] array = allVisibleTextsWithPosition;
-			OptionItem[] array2 = array;
-			foreach (OptionItem optionItem in array2)
+			foreach (OptionItem optionItem in array)
 			{
 				if (optionItem.ClickableComponent != null)
 				{
@@ -8856,8 +8559,7 @@ public class Plugin : BaseUnityPlugin
 			}
 			Log.LogInfo((object)"没有找到可点击组件，尝试用短文本猜测");
 			array = allVisibleTextsWithPosition;
-			OptionItem[] array3 = array;
-			foreach (OptionItem optionItem2 in array3)
+			foreach (OptionItem optionItem2 in array)
 			{
 				string text = optionItem2.Text.Trim();
 				if (!string.IsNullOrEmpty(text) && text.Length < 20 && text.Length > 0)
@@ -9170,8 +8872,7 @@ public class Plugin : BaseUnityPlugin
 			if (type2 != null)
 			{
 				MethodInfo[] methods = type2.GetMethods(BindingFlags.Static | BindingFlags.Public);
-				MethodInfo[] array2 = methods;
-				foreach (MethodInfo methodInfo in array2)
+				foreach (MethodInfo methodInfo in methods)
 				{
 					if (methodInfo.Name == "FindObjectsOfType" && methodInfo.IsGenericMethodDefinition)
 					{
@@ -9243,14 +8944,13 @@ public class Plugin : BaseUnityPlugin
 				Type type5 = Type.GetType("UnityEngine.Object, UnityEngine");
 				if (type5 != null)
 				{
-					MethodInfo[] methods2 = type5.GetMethods(BindingFlags.Static | BindingFlags.Public);
-					MethodInfo[] array3 = methods2;
-					foreach (MethodInfo methodInfo2 in array3)
+					MethodInfo[] methods = type5.GetMethods(BindingFlags.Static | BindingFlags.Public);
+					foreach (MethodInfo methodInfo2 in methods)
 					{
 						if (methodInfo2.Name == "FindObjectsByType" && methodInfo2.IsGenericMethodDefinition && methodInfo2.GetParameters().Length == 2)
 						{
 							MethodInfo methodInfo3 = methodInfo2.MakeGenericMethod(type);
-							Type type6 = Type.GetType("UnityEngine.FindObjectsInactive, UnityEngine");
+							Type? type6 = Type.GetType("UnityEngine.FindObjectsInactive, UnityEngine");
 							Type type7 = Type.GetType("UnityEngine.FindObjectsSortMode, UnityEngine");
 							if (type6 != null && type7 != null)
 							{
@@ -9285,8 +8985,7 @@ public class Plugin : BaseUnityPlugin
 			StringBuilder stringBuilder = new StringBuilder();
 			int num = 0;
 			OptionItem[] array = allVisibleTextsWithPosition;
-			OptionItem[] array2 = array;
-			foreach (OptionItem optionItem in array2)
+			foreach (OptionItem optionItem in array)
 			{
 				if (optionItem.ClickableComponent != null)
 				{

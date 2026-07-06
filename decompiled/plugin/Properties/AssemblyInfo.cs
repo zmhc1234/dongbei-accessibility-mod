@@ -12,3 +12,4 @@ using System.Security.Permissions;
 [assembly: AssemblyProduct("DongbeiAccessibility")]
 [assembly: AssemblyTitle("DongbeiAccessibility")]
 [assembly: AssemblyVersion("1.0.0.0")]
+[module: RefSafetyRules(11)]

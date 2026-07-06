@@ -61,8 +61,8 @@ public static class TextMeshProPatcher
 
 	private static void PatchTextProperty(Harmony harmony, Type type)
 	{
-		//IL_0146: Unknown result type (might be due to invalid IL or missing references)
-		//IL_014c: Expected O, but got Unknown
+		//IL_0129: Unknown result type (might be due to invalid IL or missing references)
+		//IL_012f: Expected O, but got Unknown
 		Plugin.Log.LogInfo((object)("正在获取 " + type.Name + ".text 属性..."));
 		PropertyInfo property = type.GetProperty("text", BindingFlags.DeclaredOnly | BindingFlags.Instance | BindingFlags.Public);
 		if (property == null)
